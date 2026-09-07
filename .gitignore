@@ -1,0 +1,14 @@
+__pycache__/
+.states
+.web
+*.py[cod]
+*.db
+*.log
+assets/external/
+.env
+
+# Augo runtime / per-run artifacts
+predictions_history/
+!predictions_history/.gitkeep
+user_picks.json
+bankroll.json

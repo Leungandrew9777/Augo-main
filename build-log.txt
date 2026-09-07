@@ -1,0 +1,266 @@
+﻿#1  build: 
+https://depot.dev/orgs/8cb6gmkn89/projects/tsmgc2ztm1/builds/43m1sn9lq5
+#1 DONE 0.0s
+
+#2  launching amd64 machine
+#2 DONE 4.7s
+
+#3  connecting to amd64 machine
+#3 DONE 7.2s
+
+#4  fetching git attributes
+#4 DONE 0.0s
+
+#5  load build definition from Dockerfile
+#5 transferring dockerfile: 30B 0.1s
+#5 transferring dockerfile: 1.92kB 0.2s done
+#5 DONE 0.3s
+
+#6  load metadata for public.ecr.aws/p3v4g4o2/reflex-cloud-base:v0.0.17-py3.14
+#6 DONE 0.7s
+
+#7  load .dockerignore
+#7 transferring context: 0.1s
+#7 transferring context: 2B 0.1s done
+#7 DONE 0.2s
+
+#8  load build context
+#8 DONE 0.0s
+
+#9 [1/7] FROM 
+public.ecr.aws/p3v4g4o2/reflex-cloud-base:v0.0.17-py3.14@sha256:823f15d05eda3f40
+03952b0041d606ff2ea813ce525fd030de41a5fdf6770a8b
+#9 resolve 
+public.ecr.aws/p3v4g4o2/reflex-cloud-base:v0.0.17-py3.14@sha256:823f15d05eda3f40
+03952b0041d606ff2ea813ce525fd030de41a5fdf6770a8b 0.0s done
+#9 DONE 0.3s
+
+#8  load build context
+#8 transferring context: 9.01MB 1.5s done
+#8 DONE 1.6s
+
+#9 [1/7] FROM 
+public.ecr.aws/p3v4g4o2/reflex-cloud-base:v0.0.17-py3.14@sha256:823f15d05eda3f40
+03952b0041d606ff2ea813ce525fd030de41a5fdf6770a8b
+#9 sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1 32B /
+32B 0.1s done
+#9 sha256:a54903d0856c90347f157d1c6e7ff08e08e6bee7a876f496bf720ddceaa66cc9 217B 
+/ 217B 0.1s done
+#9 sha256:68720a5feda164fe047d87fe458875878ccf3deb09dcf57dd4e1ee043c82f884 162B 
+/ 162B 0.1s done
+#9 sha256:73b5f957545281a24f46c6f1521a5296c4bd27f6a0c3816703308f2a3ab85788 548B 
+/ 548B 0.1s done
+#9 sha256:80729a641cf66057d83ac227616eeea8aacd6a702d7ad4eff6f2e99c6aa25127 
+3.61kB / 3.61kB 0.1s done
+#9 sha256:fbb3efb6cd8df4a348acfa70cc7137355249275863cc88dcfd8e979077c35701 136B 
+/ 136B 0.1s done
+#9 sha256:6f8e8bae4ce305b26753b6467472eff22b16ccda2436b7f5ff3c070d47bebc7c 
+23.90MB / 23.90MB 0.8s done
+#9 sha256:2bbf6e277eea76010be1dccc57e6edac2bd3ad9e2fde8db2270a64508b233780 248B 
+/ 248B 0.1s done
+#9 sha256:2af0bdd2bdbbbe6b7feed38f65eb78a5b3f84ee8aece187d37dd717e02091d48 
+16.14MB / 16.14MB 0.1s done
+#9 sha256:d4025aea9e4c1e743787a4c2298d6f6d593a0200c17f93f55a7b730ffe271398 
+12.24MB / 12.24MB 0.1s done
+#9 sha256:26ece212626a44451fd18280956791ed8d3fed8fd252717a970c2b79411c4903 
+1.29MB / 1.29MB 0.1s done
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+25.17MB / 342.29MB 1.1s
+#9 sha256:02d7611c4eae219af91448a4720bdba036575d3bc0356cfe12774af85daa6aff 
+29.78MB / 29.78MB 1.0s done
+#9 extracting 
+sha256:02d7611c4eae219af91448a4720bdba036575d3bc0356cfe12774af85daa6aff
+#9 extracting 
+sha256:02d7611c4eae219af91448a4720bdba036575d3bc0356cfe12774af85daa6aff 0.3s 
+done
+#9 extracting 
+sha256:26ece212626a44451fd18280956791ed8d3fed8fd252717a970c2b79411c4903 0.0s 
+done
+#9 extracting 
+sha256:d4025aea9e4c1e743787a4c2298d6f6d593a0200c17f93f55a7b730ffe271398
+#9 extracting 
+sha256:d4025aea9e4c1e743787a4c2298d6f6d593a0200c17f93f55a7b730ffe271398 0.1s 
+done
+#9 extracting 
+sha256:2bbf6e277eea76010be1dccc57e6edac2bd3ad9e2fde8db2270a64508b233780 done
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+51.38MB / 342.29MB 1.8s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+77.59MB / 342.29MB 2.6s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+98.57MB / 342.29MB 3.2s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+119.54MB / 342.29MB 3.9s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+140.51MB / 342.29MB 4.7s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+161.48MB / 342.29MB 5.4s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+182.45MB / 342.29MB 6.5s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+201.33MB / 342.29MB 6.9s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+219.15MB / 342.29MB 7.7s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+240.12MB / 342.29MB 8.6s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+261.10MB / 342.29MB 9.2s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+282.07MB / 342.29MB 9.9s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+303.04MB / 342.29MB 10.4s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+324.01MB / 342.29MB 10.7s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+342.29MB / 342.29MB 11.0s
+#9 sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 
+342.29MB / 342.29MB 12.5s done
+#9 extracting 
+sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31
+#9 extracting 
+sha256:ff7bee826747024dbb3f14bea51b425d58dcc9ac522424d3b2fe95a2f61d0e31 2.6s 
+done
+#9 extracting 
+sha256:2af0bdd2bdbbbe6b7feed38f65eb78a5b3f84ee8aece187d37dd717e02091d48 0.1s 
+done
+#9 DONE 15.6s
+
+#9 [1/7] FROM 
+public.ecr.aws/p3v4g4o2/reflex-cloud-base:v0.0.17-py3.14@sha256:823f15d05eda3f40
+03952b0041d606ff2ea813ce525fd030de41a5fdf6770a8b
+#9 extracting 
+sha256:fbb3efb6cd8df4a348acfa70cc7137355249275863cc88dcfd8e979077c35701 done
+#9 extracting 
+sha256:73b5f957545281a24f46c6f1521a5296c4bd27f6a0c3816703308f2a3ab85788 done
+#9 extracting 
+sha256:80729a641cf66057d83ac227616eeea8aacd6a702d7ad4eff6f2e99c6aa25127 done
+#9 extracting 
+sha256:68720a5feda164fe047d87fe458875878ccf3deb09dcf57dd4e1ee043c82f884 done
+#9 extracting 
+sha256:a54903d0856c90347f157d1c6e7ff08e08e6bee7a876f496bf720ddceaa66cc9 done
+#9 extracting 
+sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1 done
+#9 extracting 
+sha256:6f8e8bae4ce305b26753b6467472eff22b16ccda2436b7f5ff3c070d47bebc7c
+#9 extracting 
+sha256:6f8e8bae4ce305b26753b6467472eff22b16ccda2436b7f5ff3c070d47bebc7c 0.2s 
+done
+#9 DONE 15.9s
+
+#10 [2/7] RUN /home/reflexuser/.local/bin/uv venv /home/reflexuser/venv
+#10 0.259 Using CPython 3.14.2 interpreter at: /usr/local/bin/python
+#10 0.259 Creating virtual environment at: venv
+#10 DONE 7.7s
+
+#11 [3/7] RUN chmod +x /home/reflexuser/venv/bin/activate
+#11 DONE 0.2s
+
+#12 [4/7] COPY --chown=reflexuser . /home/reflexuser/app
+#12 DONE 0.2s
+
+#13 [5/7] COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+#13 DONE 0.0s
+
+#14 [6/7] RUN . /home/reflexuser/venv/bin/activate &&     cd 
+/home/reflexuser/app &&     if [ -f requirements.txt ]; then         echo 
+"Installing from requirements.txt" &&         /home/reflexuser/.local/bin/uv pip
+install -r requirements.txt;     elif [ -f uv.lock ]; then         echo 
+"Installing from uv.lock" &&         /home/reflexuser/.local/bin/uv sync 
+--locked --no-dev --active;     elif [ -f pyproject.toml ]; then         echo 
+"Installing from pyproject.toml" &&         /home/reflexuser/.local/bin/uv pip 
+install .;     else         echo "No dependency file found (requirements.txt, 
+uv.lock, or pyproject.toml)" &&         exit 1;     fi
+#14 0.111 Installing from requirements.txt
+#14 0.227 Using Python 3.14.2 environment at: /home/reflexuser/venv
+#14 0.413 Resolved 53 packages in 185ms
+#14 0.423 Downloading pygments (1.2MiB)
+#14 0.426 Downloading xgboost (125.6MiB)
+#14 0.426 Downloading nvidia-nccl-cu12 (286.3MiB)
+#14 0.426 Downloading pandas (11.8MiB)
+#14 0.428 Downloading scikit-learn (9.0MiB)
+#14 0.430 Downloading scipy (33.6MiB)
+#14 0.430 Downloading pydantic-core (2.0MiB)
+#14 0.433 Downloading sqlalchemy (3.1MiB)
+#14 0.434 Downloading granian (6.5MiB)
+#14 0.584  Downloading pydantic-core
+#14 0.668  Downloading pygments
+#14 0.685  Downloading sqlalchemy
+#14 0.799  Downloading granian
+#14 0.935  Downloading scikit-learn
+#14 1.504  Downloading scipy
+#14 1.517  Downloading pandas
+#14 2.328  Downloading xgboost
+#14 2.898  Downloading nvidia-nccl-cu12
+#14 3.260    Building numpy==2.2.6
+#14 5.388   Î Failed to build `numpy==2.2.6`
+reflex : Traceback (most recent call last):
+At C:\Users\ykwia\AppData\Local\Temp\ps-script-a444ed47-2900-47a0-8a22-2b72b19b19e2.ps1:88 char:36
++ ... Augo-main"; reflex cloud apps build-logs d95d87e5-b8bf-47dc-9b9b-945c ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Traceback (most recent call last)::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Scripts\reflex.exe\__main__.py", line 5, in <module>
+    sys.exit(cli())
+             ~~~^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\click\core.py", line 1524, in __call__
+    return self.main(*args, **kwargs)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\click\core.py", line 1445, in main
+    rv = self.invoke(ctx)
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\click\core.py", line 1912, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\click\core.py", line 1912, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\click\core.py", line 1912, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\click\core.py", line 1308, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\click\core.py", line 877, in invoke
+    return callback(*args, **kwargs)
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\reflex_cli\v2\apps.py", line 135, in 
+deployment_build_logs
+    console.print(logs)
+    ~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\reflex_cli\utils\console.py", line 
+43, in print
+    _console.print(msg, **kwargs)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\rich\console.py", line 1700, in print
+    with self:
+         ^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\rich\console.py", line 863, in 
+__exit__
+    self._exit_buffer()
+    ~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\rich\console.py", line 819, in 
+_exit_buffer
+    self._check_buffer()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\rich\console.py", line 2051, in 
+_check_buffer
+    self._write_buffer()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\rich\console.py", line 2087, in 
+_write_buffer
+    legacy_windows_render(buffer, LegacyWindowsTerm(self.file))
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\rich\_windows_renderer.py", line 19, 
+in legacy_windows_render
+    term.write_text(text)
+    ~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\site-packages\rich\_win32_console.py", line 402, in 
+write_text
+    self.write(text)
+    ~~~~~~~~~~^^^^^^
+  File "C:\Users\ykwia\AppData\Local\Programs\Python\Python314\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 3-5: character maps to <undefined>
+#14 5.388
