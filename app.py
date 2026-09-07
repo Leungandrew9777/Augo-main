@@ -85,10 +85,10 @@ def format_odds_display(v: float, cap: float = ODDS_DISPLAY_CAP) -> str:
 
 PL_TEAMS: list[str] = sorted([
     "Arsenal", "Aston Villa", "Bournemouth", "Brentford",
-    "Brighton & Hove Albion", "Burnley", "Chelsea", "Crystal Palace",
-    "Everton", "Fulham", "Leeds United", "Liverpool", "Manchester City",
-    "Manchester United", "Newcastle", "Nottingham Forest", "Sunderland",
-    "Tottenham Hotspur", "West Ham United", "Wolverhampton Wanderers",
+    "Brighton & Hove Albion", "Chelsea", "Coventry City", "Crystal Palace",
+    "Everton", "Fulham", "Hull City", "Ipswich Town", "Leeds United",
+    "Liverpool", "Manchester City", "Manchester United", "Newcastle",
+    "Nottingham Forest", "Sunderland", "Tottenham Hotspur",
 ])
 
 TEAM_BADGES: dict[str, str] = {
@@ -99,9 +99,12 @@ TEAM_BADGES: dict[str, str] = {
     "Brighton & Hove Albion":     "https://resources.premierleague.com/premierleague/badges/t36.png",
     "Burnley":                    "https://resources.premierleague.com/premierleague/badges/t90.png",
     "Chelsea":                    "https://resources.premierleague.com/premierleague/badges/t8.png",
+    "Coventry City":              "https://resources.premierleague.com/premierleague25/badges-alt/9.svg",
     "Crystal Palace":             "https://resources.premierleague.com/premierleague/badges/t31.png",
     "Everton":                    "https://resources.premierleague.com/premierleague/badges/t11.png",
     "Fulham":                     "https://resources.premierleague.com/premierleague/badges/t54.png",
+    "Hull City":                  "https://resources.premierleague.com/premierleague25/badges-alt/88.svg",
+    "Ipswich Town":               "https://resources.premierleague.com/premierleague25/badges-alt/40.svg",
     "Leeds United":               "https://resources.premierleague.com/premierleague/badges/t2.png",
     "Liverpool":                  "https://resources.premierleague.com/premierleague/badges/t14.png",
     "Manchester City":            "https://resources.premierleague.com/premierleague/badges/t43.png",

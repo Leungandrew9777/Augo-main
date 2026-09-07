@@ -206,7 +206,7 @@ def merge_understat_xg(clean_df: pd.DataFrame, xg_df: pd.DataFrame) -> pd.DataFr
 if __name__ == "__main__":
     # Include the current season (2526) + all previous you want
     loader = FootballDataLoader(
-        seasons=["2526", "2425", "2324", "2223", "2122", "2021", "1920", "1819", "1718", "1617", "1516", "1415", "1314"]
+        seasons=["2627", "2526", "2425", "2324", "2223", "2122", "2021", "1920", "1819", "1718", "1617", "1516", "1415", "1314"]
     )
     raw_data = loader.load_all()
 

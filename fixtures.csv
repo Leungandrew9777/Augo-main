@@ -1,72 +1,11 @@
 gameweek,date,home_team,away_team
-32,11/4/2026,West Ham,Wolves
-32,11/4/2026,Arsenal,Bournemouth
-32,11/4/2026,Brentford,Everton
-32,11/4/2026,Burnley,Brighton
-32,12/4/2026,Liverpool,Fulham
-32,12/4/2026,Crystal Palace,Newcastle
-32,12/4/2026,Nott'm Forest,Aston Villa
-32,12/4/2026,Sunderland,Tottenham
-32,12/4/2026,Chelsea,Man City
-32,14/4/2026,Man United,Leeds
-33,18/4/2026,Brentford,Fulham
-33,18/4/2026,Leeds,Wolves
-33,18/4/2026,Newcastle,Bournemouth
-33,19/4/2026,Tottenham,Brighton
-33,19/4/2026,Chelsea,Man United
-33,19/4/2026,Aston Villa,Sunderland
-33,19/4/2026,Everton,Liverpool
-33,19/4/2026,Nott'm Forest,Burnley
-33,19/4/2026,Arsenal,Man City
-33,21/4/2026,Crystal Palace,West Ham
-34,22/4/2026,Brighton,Chelsea
-34,23/4/2026,Bournemouth,Leeds
-34,23/4/2026,Burnley,Man City
-34,25/4/2026,Sunderland,Nott'm Forest
-34,25/4/2026,Fulham,Aston Villa
-34,25/4/2026,Liverpool,Crystal Palace
-34,25/4/2026,West Ham,Everton
-34,25/4/2026,Wolves,Tottenham
-34,26/4/2026,Arsenal,Newcastle
-34,28/4/2026,Man United,Brentford
-35,2/5/2026,Leeds,Burnley
-35,2/5/2026,Aston Villa,Tottenham
-35,2/5/2026,Bournemouth,Crystal Palace
-35,2/5/2026,Brentford,West Ham
-35,2/5/2026,Newcastle,Brighton
-35,2/5/2026,Wolves,Sunderland
-35,3/5/2026,Arsenal,Fulham
-35,3/5/2026,Man United,Liverpool
-35,4/5/2026,Chelsea,Nott'm Forest
-35,5/5/2026,Everton,Man City
-36,9/5/2026,Liverpool,Chelsea
-36,9/5/2026,Brighton,Wolves
-36,9/5/2026,Fulham,Bournemouth
-36,9/5/2026,Sunderland,Man United
-36,10/5/2026,Burnley,Aston Villa
-36,10/5/2026,Crystal Palace,Everton
-36,10/5/2026,Man City,Brentford
-36,10/5/2026,Nott'm Forest,Newcastle
-36,10/5/2026,West Ham,Arsenal
-36,12/5/2026,Tottenham,Leeds
-36,13/5/2026,Man City,Crystal Palace
-37,17/5/2026,Wolves,Fulham
-37,17/5/2026,Aston Villa,Liverpool
-37,17/5/2026,Brentford,Crystal Palace
-37,17/5/2026,Chelsea,Tottenham
-37,17/5/2026,Everton,Sunderland
-37,17/5/2026,Leeds,Brighton
-37,17/5/2026,Man United,Nott'm Forest
-37,18/5/2026,Newcastle,West Ham
-37,19/5/2026,Arsenal,Burnley
-37,20/5/2026,Bournemouth,Man City
-38,24/5/2026,Brighton,Man United
-38,24/5/2026,Burnley,Wolves
-38,24/5/2026,Crystal Palace,Arsenal
-38,24/5/2026,Fulham,Newcastle
-38,24/5/2026,Liverpool,Brentford
-38,24/5/2026,Man City,Aston Villa
-38,24/5/2026,Nott'm Forest,Bournemouth
-38,24/5/2026,Sunderland,Chelsea
-38,24/5/2026,Tottenham,Everton
-38,24/5/2026,West Ham,Leeds
+4,12/9/2026,Aston Villa,Nott'm Forest
+4,12/9/2026,Bournemouth,Brentford
+4,12/9/2026,Chelsea,Hull
+4,12/9/2026,Crystal Palace,Ipswich
+4,12/9/2026,Liverpool,Fulham
+4,12/9/2026,Tottenham,Everton
+4,12/9/2026,Sunderland,Arsenal
+4,13/9/2026,Coventry,Brighton
+4,13/9/2026,Man United,Man City
+4,14/9/2026,Leeds,Newcastle United
