@@ -8,18 +8,21 @@ import time
 import requests
 
 class FootballDataLoader:
-    BASE_URL = "https://www.football-data.co.uk/mmz4281"
+    # NOTE: no "www." — football-data.co.uk returns 503 with www and works without.
+    BASE_URL = "https://football-data.co.uk/mmz4281"
     LEAGUES = {"E0": "Premier League"}
 
     # Core columns we actually need for the model + odds
     COLUMNS_TO_KEEP = [
         "Date", "HomeTeam", "AwayTeam",
         "FTHG", "FTAG", "FTR",           # Full-time result & goals
-        "HTHG", "HTAG", "HTR",           # Half-time (optional but useful)
+        "HTHG", "HTAG", "HTR",           # Half-time result & goals
         "HS", "AS", "HST", "AST",        # Shots & shots on target
         "HF", "AF", "HC", "AC",          # Fouls & corners
         "HY", "AY", "HR", "AR",          # Cards
-        "B365H", "B365D", "B365A"        # Bet365 odds (key feature)
+        "B365H", "B365D", "B365A",       # Bet365 1X2 odds
+        "B365>2.5", "B365<2.5",          # Bet365 over/under 2.5 goals
+        "HxG", "AxG",                    # Football-Data xG (when available)
     ]
 
     def __init__(self, seasons: list[str]):
@@ -71,7 +74,8 @@ class DataCleaner:
         numeric_cols = [
             "FTHG", "FTAG", "HTHG", "HTAG", "HS", "AS", "HST", "AST",
             "HF", "AF", "HC", "AC", "HY", "AY", "HR", "AR",
-            "B365H", "B365D", "B365A"
+            "B365H", "B365D", "B365A", "B365>2.5", "B365<2.5",
+            "HxG", "AxG",
         ]
         for col in numeric_cols:
             if col in df.columns:
@@ -197,6 +201,11 @@ def merge_understat_xg(clean_df: pd.DataFrame, xg_df: pd.DataFrame) -> pd.DataFr
             row = lookup.loc[key]
             out.at[i, "home_xg"] = float(row["home_xg"])
             out.at[i, "away_xg"] = float(row["away_xg"])
+    # Fall back to football-data's own xG columns (HxG/AxG) where Understat misses
+    if "HxG" in out.columns:
+        out["home_xg"] = out["home_xg"].fillna(pd.to_numeric(out["HxG"], errors="coerce"))
+    if "AxG" in out.columns:
+        out["away_xg"] = out["away_xg"].fillna(pd.to_numeric(out["AxG"], errors="coerce"))
     matched = out["home_xg"].notna().sum()
     print(f"   xG matched {matched}/{len(out)} matches.")
     return out
@@ -204,9 +213,9 @@ def merge_understat_xg(clean_df: pd.DataFrame, xg_df: pd.DataFrame) -> pd.DataFr
 
 # ====================== RUN THIS ======================
 if __name__ == "__main__":
-    # Include the current season (2526) + all previous you want
+    # Include the current season (2627) + all previous you want
     loader = FootballDataLoader(
-        seasons=["2526", "2425", "2324", "2223", "2122", "2021", "1920", "1819", "1718", "1617", "1516", "1415", "1314"]
+        seasons=["2627", "2526", "2425", "2324", "2223", "2122", "2021", "1920", "1819", "1718", "1617", "1516", "1415", "1314"]
     )
     raw_data = loader.load_all()
 

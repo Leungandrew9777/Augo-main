@@ -13,7 +13,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score, log_loss, mean_poisson_deviance, confusion_matrix
+from sklearn.metrics import accuracy_score, log_loss, mean_poisson_deviance, confusion_matrix, mean_absolute_error
 from xgboost import XGBClassifier
 import joblib
 
@@ -46,12 +46,40 @@ def fit_goal_model(X_fit: pd.DataFrame, y_fit: pd.Series, sample_weight):
     return model
 
 
+def fit_count_model(X_fit: pd.DataFrame, y_fit: pd.Series, sample_weight, kind: str = "poisson"):
+    """Poisson (goals) or Tweedie power=1.5 (corners — overdispersed) count model."""
+    if kind == "poisson":
+        model = Pipeline(steps=[
+            ("scaler", StandardScaler()),
+            ("model", PoissonRegressor(alpha=0.01, max_iter=1000)),
+        ])
+    else:
+        from sklearn.linear_model import TweedieRegressor
+        model = Pipeline(steps=[
+            ("scaler", StandardScaler()),
+            ("model", TweedieRegressor(power=1.5, alpha=0.01, max_iter=1000, link="log")),
+        ])
+    model.fit(X_fit, y_fit, model__sample_weight=sample_weight)
+    return model
+
+
 # Use only columns that actually exist in the file
 feature_cols = [c for c in MODEL_FEATURE_COLS if c in df.columns]
 X = df[feature_cols].fillna(df[feature_cols].median())
 y = df["Result"].astype(int)  # 0=Away, 1=Draw, 2=Home
 y_home_goals = df["FTHG"].astype(float)
 y_away_goals = df["FTAG"].astype(float)
+y_ht_home = df["HTHG"].astype(float)
+y_ht_away = df["HTAG"].astype(float)
+y_corner_home = df["HC"].astype(float)
+y_corner_away = df["AC"].astype(float)
+
+# Corner models also use the corner-specific rolling stats that exist in the CSV
+CORNER_FEATURE_COLS = feature_cols + [c for c in [
+    "home_avg_Corners", "away_avg_Corners", "diff_avg_Corners",
+    "home_avg_CornersAgainst", "away_avg_CornersAgainst", "diff_avg_CornersAgainst",
+] if c in df.columns]
+Xc = df[CORNER_FEATURE_COLS].fillna(df[CORNER_FEATURE_COLS].median())
 
 print(f"Training stacked ensemble on {len(X):,} matches with {len(feature_cols)} features")
 
@@ -241,6 +269,10 @@ vote_scores = []
 stacked_logloss = []
 home_devs = []
 away_devs = []
+ht_home_devs = []
+ht_away_devs = []
+corner_home_mae = []
+corner_away_mae = []
 
 for train_idx, test_idx in tscv.split(X):
     X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
@@ -283,10 +315,28 @@ for train_idx, test_idx in tscv.split(X):
     home_devs.append(mean_poisson_deviance(y_home_goals.iloc[test_idx], pred_h))
     away_devs.append(mean_poisson_deviance(y_away_goals.iloc[test_idx], pred_a))
 
+    # Half-time goal models
+    ht_hm = fit_count_model(X_tr, y_ht_home.iloc[train_idx], decay_tr, "poisson")
+    ht_am = fit_count_model(X_tr, y_ht_away.iloc[train_idx], decay_tr, "poisson")
+    ht_home_devs.append(mean_poisson_deviance(
+        y_ht_home.iloc[test_idx], np.clip(ht_hm.predict(X.iloc[test_idx]), 0.05, None)))
+    ht_away_devs.append(mean_poisson_deviance(
+        y_ht_away.iloc[test_idx], np.clip(ht_am.predict(X.iloc[test_idx]), 0.05, None)))
+
+    # Corner models (Tweedie, overdispersed)
+    c_hm = fit_count_model(Xc.iloc[train_idx], y_corner_home.iloc[train_idx], decay_tr, "tweedie")
+    c_am = fit_count_model(Xc.iloc[train_idx], y_corner_away.iloc[train_idx], decay_tr, "tweedie")
+    corner_home_mae.append(mean_absolute_error(
+        y_corner_home.iloc[test_idx], np.clip(c_hm.predict(Xc.iloc[test_idx]), 0.5, None)))
+    corner_away_mae.append(mean_absolute_error(
+        y_corner_away.iloc[test_idx], np.clip(c_am.predict(Xc.iloc[test_idx]), 0.5, None)))
+
 print(f"[OK] STEP 6 Walk-forward CV Accuracy (stacked): {np.mean(stacked_scores):.4f}")
 print(f"[OK] STEP 6 Walk-forward CV Accuracy (soft-vote [1,1,2]): {np.mean(vote_scores):.4f}")
 print(f"[OK] STEP 6 Stacked CV log-loss: {np.mean(stacked_logloss):.4f}")
 print(f"[OK] Goal model mean Poisson deviance: home={np.mean(home_devs):.4f}, away={np.mean(away_devs):.4f}")
+print(f"[OK] HT goal model deviance: home={np.mean(ht_home_devs):.4f}, away={np.mean(ht_away_devs):.4f}")
+print(f"[OK] Corner model MAE: home={np.mean(corner_home_mae):.2f}, away={np.mean(corner_away_mae):.2f}")
 
 mask = oof_y >= 0
 print("STEP 6b: Out-of-fold evaluation (stacked model, probabilistic metrics)")
@@ -310,14 +360,24 @@ print(f"[OK] Calibration temperature T = {calibrator.temperature_:.4f}")
 
 goal_model_home = fit_goal_model(X, y_home_goals, final_decay)
 goal_model_away = fit_goal_model(X, y_away_goals, final_decay)
+goal_model_ht_home = fit_count_model(X, y_ht_home, final_decay, "poisson")
+goal_model_ht_away = fit_count_model(X, y_ht_away, final_decay, "poisson")
+corner_model_home = fit_count_model(Xc, y_corner_home, final_decay, "tweedie")
+corner_model_away = fit_count_model(Xc, y_corner_away, final_decay, "tweedie")
 joblib.dump(stacked_final, "xgboost_premier_league_model.pkl")
 joblib.dump(goal_model_home, "goal_model_home.pkl")
 joblib.dump(goal_model_away, "goal_model_away.pkl")
+joblib.dump(goal_model_ht_home, "goal_model_ht_home.pkl")
+joblib.dump(goal_model_ht_away, "goal_model_ht_away.pkl")
+joblib.dump(corner_model_home, "corner_model_home.pkl")
+joblib.dump(corner_model_away, "corner_model_away.pkl")
 df.to_csv("premier_league_with_elo_best.csv", index=False)
 
 print("\nSTEP 5 + 6 + 7 COMPLETE")
 print("   Stacked model saved -> xgboost_premier_league_model.pkl")
 print("   Goal model home saved -> goal_model_home.pkl")
 print("   Goal model away saved -> goal_model_away.pkl")
+print("   HT goal models saved -> goal_model_ht_home.pkl / goal_model_ht_away.pkl")
+print("   Corner models saved -> corner_model_home.pkl / corner_model_away.pkl")
 print("   Data saved   -> premier_league_with_elo_best.csv")
 print("   Your existing app.py and run_pipeline.py will now use the new stacked ensemble.")

@@ -85,10 +85,10 @@ def format_odds_display(v: float, cap: float = ODDS_DISPLAY_CAP) -> str:
 
 PL_TEAMS: list[str] = sorted([
     "Arsenal", "Aston Villa", "Bournemouth", "Brentford",
-    "Brighton & Hove Albion", "Burnley", "Chelsea", "Crystal Palace",
-    "Everton", "Fulham", "Leeds United", "Liverpool", "Manchester City",
-    "Manchester United", "Newcastle", "Nottingham Forest", "Sunderland",
-    "Tottenham Hotspur", "West Ham United", "Wolverhampton Wanderers",
+    "Brighton & Hove Albion", "Chelsea", "Coventry City", "Crystal Palace",
+    "Everton", "Fulham", "Hull City", "Ipswich Town", "Leeds United",
+    "Liverpool", "Manchester City", "Manchester United", "Newcastle",
+    "Nottingham Forest", "Sunderland", "Tottenham Hotspur",
 ])
 
 TEAM_BADGES: dict[str, str] = {
@@ -99,9 +99,12 @@ TEAM_BADGES: dict[str, str] = {
     "Brighton & Hove Albion":     "https://resources.premierleague.com/premierleague/badges/t36.png",
     "Burnley":                    "https://resources.premierleague.com/premierleague/badges/t90.png",
     "Chelsea":                    "https://resources.premierleague.com/premierleague/badges/t8.png",
+    "Coventry City":              "https://resources.premierleague.com/premierleague25/badges-alt/9.svg",
     "Crystal Palace":             "https://resources.premierleague.com/premierleague/badges/t31.png",
     "Everton":                    "https://resources.premierleague.com/premierleague/badges/t11.png",
     "Fulham":                     "https://resources.premierleague.com/premierleague/badges/t54.png",
+    "Hull City":                  "https://resources.premierleague.com/premierleague25/badges-alt/88.svg",
+    "Ipswich Town":               "https://resources.premierleague.com/premierleague25/badges-alt/40.svg",
     "Leeds United":               "https://resources.premierleague.com/premierleague/badges/t2.png",
     "Liverpool":                  "https://resources.premierleague.com/premierleague/badges/t14.png",
     "Manchester City":            "https://resources.premierleague.com/premierleague/badges/t43.png",
@@ -483,17 +486,25 @@ class State(rx.State):
         return model, df_elo, elo_lookup_key
 
     def _with_poisson_layer(self, upcoming: pd.DataFrame, df_elo: pd.DataFrame) -> pd.DataFrame:
-        """Attach λ + Poisson markets using goal_model_*.pkl (same as run_pipeline)."""
-        gh_path = os.path.join(APP_DIR, "goal_model_home.pkl")
-        ga_path = os.path.join(APP_DIR, "goal_model_away.pkl")
-        if not (os.path.isfile(gh_path) and os.path.isfile(ga_path)):
-            return upcoming
+        """Attach λ + Poisson markets (FT/HT/corners) using the trained models."""
         try:
-            from run_pipeline import add_poisson_outputs
+            from run_pipeline import add_poisson_outputs, add_ht_outputs, add_corner_outputs
 
-            gh = joblib.load(gh_path)
-            ga = joblib.load(ga_path)
-            return add_poisson_outputs(upcoming, gh, ga, df_elo)
+            gh_path = os.path.join(APP_DIR, "goal_model_home.pkl")
+            ga_path = os.path.join(APP_DIR, "goal_model_away.pkl")
+            if os.path.isfile(gh_path) and os.path.isfile(ga_path):
+                upcoming = add_poisson_outputs(upcoming, joblib.load(gh_path), joblib.load(ga_path), df_elo)
+
+            ht_h = os.path.join(APP_DIR, "goal_model_ht_home.pkl")
+            ht_a = os.path.join(APP_DIR, "goal_model_ht_away.pkl")
+            if os.path.isfile(ht_h) and os.path.isfile(ht_a):
+                upcoming = add_ht_outputs(upcoming, joblib.load(ht_h), joblib.load(ht_a), df_elo)
+
+            ch = os.path.join(APP_DIR, "corner_model_home.pkl")
+            ca = os.path.join(APP_DIR, "corner_model_away.pkl")
+            if os.path.isfile(ch) and os.path.isfile(ca):
+                upcoming = add_corner_outputs(upcoming, joblib.load(ch), joblib.load(ca), df_elo)
+            return upcoming
         except Exception:
             return upcoming
 
@@ -813,11 +824,25 @@ class State(rx.State):
         prediction.setdefault("poisson_over_25", 0.0)
         prediction.setdefault("poisson_btts", 0.0)
         prediction.setdefault("disp_poisson_xg_total", "—")
+        prediction.setdefault("disp_poisson_o15", "—")
         prediction.setdefault("disp_poisson_o25", "—")
+        prediction.setdefault("disp_poisson_o35", "—")
+        prediction.setdefault("disp_poisson_o45", "—")
         prediction.setdefault("disp_poisson_btts", "—")
         prediction.setdefault("disp_poisson_vs_ensemble", "—")
         prediction.setdefault("poisson_correct_scores", [])
         prediction.setdefault("disp_poisson_correct_scores", "—")
+        prediction.setdefault("disp_lambda_ht_home", "—")
+        prediction.setdefault("disp_lambda_ht_away", "—")
+        prediction.setdefault("disp_ht_prob_home", "—")
+        prediction.setdefault("disp_ht_prob_draw", "—")
+        prediction.setdefault("disp_ht_prob_away", "—")
+        prediction.setdefault("disp_ht_o05", "—")
+        prediction.setdefault("disp_ht_o15", "—")
+        prediction.setdefault("disp_ht_o25", "—")
+        prediction.setdefault("disp_corner_total", "—")
+        for line in (8.5, 9.5, 10.5, 11.5, 12.5):
+            prediction.setdefault(f"disp_corner_over_{str(line).replace('.', '')}", "—")
         _backfill_poisson_display_fields(prediction)
         prediction["explanation"] = build_explanation(prediction)
         prediction.setdefault("explanation_summary", prediction["explanation"].get("driver_summary", ""))
@@ -1153,11 +1178,49 @@ def poisson_summary(p: dict) -> rx.Component:
             rx.text("Σλ", color="#555", font_size="0.58em", font_weight="600"),
             rx.text(p["disp_poisson_xg_total"], color="#ccc", font_size="0.62em", font_weight="700"),
             rx.text("·", color="#333", font_size="0.62em", padding_x="4px"),
+            rx.text("O1.5", color="#555", font_size="0.58em", font_weight="600"),
+            rx.text(p["disp_poisson_o15"], color="#9CCC65", font_size="0.62em", font_weight="700"),
             rx.text("O2.5", color="#555", font_size="0.58em", font_weight="600"),
             rx.text(p["disp_poisson_o25"], color="#9CCC65", font_size="0.62em", font_weight="700"),
+            rx.text("O3.5", color="#555", font_size="0.58em", font_weight="600"),
+            rx.text(p["disp_poisson_o35"], color="#9CCC65", font_size="0.62em", font_weight="700"),
             rx.text("·", color="#333", font_size="0.62em", padding_x="4px"),
             rx.text("BTTS", color="#555", font_size="0.58em", font_weight="600"),
             rx.text(p["disp_poisson_btts"], color="#81D4FA", font_size="0.62em", font_weight="700"),
+            width="100%",
+            align="center",
+            spacing="1",
+        ),
+        rx.hstack(
+            rx.text("HT", color="#555", font_size="0.58em", font_weight="700"),
+            rx.text(p["disp_lambda_ht_home"], color="#4CAF50", font_size="0.62em", font_weight="700"),
+            rx.text("-", color="#333", font_size="0.62em"),
+            rx.text(p["disp_lambda_ht_away"], color="#F44336", font_size="0.62em", font_weight="700"),
+            rx.text("·", color="#333", font_size="0.62em", padding_x="4px"),
+            rx.text("H", rx.text.span(p["disp_ht_prob_home"], font_weight="700"), color="#4CAF50", font_size="0.58em"),
+            rx.text("D", rx.text.span(p["disp_ht_prob_draw"], font_weight="700"), color="#FFC107", font_size="0.58em"),
+            rx.text("A", rx.text.span(p["disp_ht_prob_away"], font_weight="700"), color="#F44336", font_size="0.58em"),
+            rx.text("·", color="#333", font_size="0.62em", padding_x="4px"),
+            rx.text("O0.5", color="#555", font_size="0.58em", font_weight="600"),
+            rx.text(p["disp_ht_o05"], color="#9CCC65", font_size="0.62em", font_weight="700"),
+            rx.text("O1.5", color="#555", font_size="0.58em", font_weight="600"),
+            rx.text(p["disp_ht_o15"], color="#9CCC65", font_size="0.62em", font_weight="700"),
+            width="100%",
+            align="center",
+            spacing="1",
+        ),
+        rx.hstack(
+            rx.text("COR", color="#555", font_size="0.58em", font_weight="700"),
+            rx.text(p["disp_corner_total"], color="#ccc", font_size="0.62em", font_weight="700"),
+            rx.text("·", color="#333", font_size="0.62em", padding_x="4px"),
+            rx.text("O8.5", color="#555", font_size="0.58em", font_weight="600"),
+            rx.text(p["disp_corner_over_85"], color="#FFB74D", font_size="0.62em", font_weight="700"),
+            rx.text("O9.5", color="#555", font_size="0.58em", font_weight="600"),
+            rx.text(p["disp_corner_over_95"], color="#FFB74D", font_size="0.62em", font_weight="700"),
+            rx.text("O10.5", color="#555", font_size="0.58em", font_weight="600"),
+            rx.text(p["disp_corner_over_105"], color="#FFB74D", font_size="0.62em", font_weight="700"),
+            rx.text("O11.5", color="#555", font_size="0.58em", font_weight="600"),
+            rx.text(p["disp_corner_over_115"], color="#FFB74D", font_size="0.62em", font_weight="700"),
             width="100%",
             align="center",
             spacing="1",

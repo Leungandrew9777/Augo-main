@@ -15,6 +15,8 @@ TEAM_ALIASES_TO_ELO: dict[str, str] = {
     "Manchester City": "Man City",
     "Nottingham Forest": "Nott'm Forest",
     "West Ham United": "West Ham",
+    "Coventry City": "Coventry",
+    "Hull City": "Hull",
 }
 
 
@@ -40,6 +42,9 @@ ODDS_API_TO_FIXTURE: dict[str, str] = {
     "AFC Bournemouth": "Bournemouth",
     "Leicester City": "Leicester",
     "Ipswich Town": "Ipswich",
+    "Coventry City": "Coventry",
+    "Hull City": "Hull",
+    "Newcastle United": "Newcastle",
 }
 
 
@@ -61,6 +66,9 @@ FIXTURE_TO_BADGE_NAME: dict[str, str] = {
     "Man City": "Manchester City",
     "Nott'm Forest": "Nottingham Forest",
     "West Ham": "West Ham United",
+    "Coventry": "Coventry City",
+    "Hull": "Hull City",
+    "Ipswich": "Ipswich Town",
 }
 
 

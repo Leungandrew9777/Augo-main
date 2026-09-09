@@ -1,4 +1,4 @@
 {
-  "predictions_cache_url": "",
-  "results_url": ""
+  "predictions_cache_url": "${AUGO_RAW_BASE}/predictions_cache.json",
+  "results_url": "${AUGO_RAW_BASE}/results.csv"
 }

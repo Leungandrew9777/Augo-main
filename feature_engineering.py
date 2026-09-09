@@ -121,7 +121,12 @@ class FeatureEngineer:
             features_list.append(row)
 
         features_df = pd.DataFrame(features_list).set_index("match_idx")
-        return df.join(features_df, how="inner").dropna(subset=[c for c in features_df.columns])
+        # Only drop rows without a computed ELO diff. Rolling venue stats can be
+        # NaN for new teams / early-season games (not enough history), and the
+        # trainer median-fills them; dropping on all features would silently
+        # remove brand-new promoted teams entirely.
+        core = [c for c in ("elo_diff",) if c in features_df.columns]
+        return df.join(features_df, how="inner").dropna(subset=core)
 
 
 class FootballELO:
