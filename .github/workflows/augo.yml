@@ -1,0 +1,101 @@
+name: Augo automation
+
+# Runs the Augo pipeline in the cloud so it keeps working when your PC is off.
+#   weekly  : sync fixtures+results -> predict -> notify -> publish   (Friday 17:00 Asia/HK)
+#   daily   : sync results -> evaluate -> notify -> publish           (09:00 Asia/HK)
+# Times are UTC on GitHub; Asia/Hong_Kong = UTC+8.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   ODDS_API_KEY       The Odds API key
+#   TELEGRAM_BOT_TOKEN Telegram bot token
+#   TELEGRAM_CHAT_ID   Telegram chat id
+#   AUGO_GIT_TOKEN     fine-grained PAT with Contents:Read+Write on Leungandrew9777/augo-data
+
+on:
+  schedule:
+    - cron: "0 1 * * *"   # 09:00 Asia/HK — daily results sync + grade
+    - cron: "0 9 * * 5"   # 17:00 Asia/HK Friday — weekly predictions
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "weekly"
+        type: choice
+        options: [daily, weekly]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: augo
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      AUGO_NON_INTERACTIVE: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Resolve run mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 1 * * *" ]; then
+            echo "mode=daily" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=weekly" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved mode: ${{ steps.mode.outputs.mode }}"
+
+      - name: Daily — sync results + grade
+        if: steps.mode.outputs.mode == 'daily'
+        run: |
+          python sync.py results --days 2
+          python evaluate.py --json
+          python notify.py --results
+
+      - name: Weekly — sync + predict + notify
+        if: steps.mode.outputs.mode == 'weekly'
+        run: |
+          python sync.py all
+          python run_pipeline.py
+          python evaluate.py --json
+          python notify.py
+
+      - name: Commit + push archives/data back to source repo (CI grading continuity)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add predictions_history predictions_cache.json results.csv evaluation_report.json
+          git commit -m "update Augo data (ci)" --allow-empty || echo "no changes to commit"
+          git push
+
+      - name: Publish to data repo (deployed app)
+        run: |
+          git clone --quiet https://x-access-token:${{ secrets.AUGO_GIT_TOKEN }}@github.com/Leungandrew9777/augo-data.git data_repo
+          cp predictions_cache.json results.csv evaluation_report.json data_repo/ 2>/dev/null || true
+          cd data_repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "update Augo data" --allow-empty || echo "no changes"
+          git push --quiet
+          echo "Published to augo-data."
