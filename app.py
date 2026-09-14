@@ -220,9 +220,13 @@ class EloChartDict(TypedDict):
 
 def _norm_fixture_date_for_sig(val: Any) -> str:
     """Normalize dates so cache fixture rows match fixtures.csv (string quirks)."""
-    ts = pd.to_datetime(val, errors="coerce", dayfirst=True)
+    raw = str(val).strip() if val is not None else ""
+    if re.match(r"^\d{4}-\d{2}-\d{2}", raw):
+        ts = pd.to_datetime(raw, errors="coerce")
+    else:
+        ts = pd.to_datetime(val, errors="coerce", dayfirst=True)
     if pd.isna(ts):
-        return str(val).strip() if val is not None else ""
+        return raw
     return str(ts.normalize().date())
 
 
@@ -257,6 +261,48 @@ def _backfill_poisson_display_fields(prediction: dict[str, Any]) -> None:
                     prediction["disp_poisson_btts"] = f"{v * 100:.1f}%"
             except (TypeError, ValueError):
                 pass
+    # O1.5 / O3.5 / O4.5 (older caches may have the raw value but not the display)
+    for line, disp in ((1.5, "disp_poisson_o15"), (3.5, "disp_poisson_o35"), (4.5, "disp_poisson_o45")):
+        if prediction.get(disp) in (None, "", "—"):
+            try:
+                v = float(prediction.get(f"poisson_over_{str(line).replace('.', '')}", float("nan")))
+                if math.isfinite(v):
+                    prediction[disp] = f"{v * 100:.1f}%"
+            except (TypeError, ValueError):
+                pass
+    # HT markets (older caches may lack display fields but have raw ones)
+    if prediction.get("disp_ht_prob_home") in (None, "", "—"):
+        try:
+            h, d, a = float(prediction["ht_prob_home"]), float(prediction["ht_prob_draw"]), float(prediction["ht_prob_away"])
+            prediction["disp_ht_prob_home"] = f"{h * 100:.1f}%"
+            prediction["disp_ht_prob_draw"] = f"{d * 100:.1f}%"
+            prediction["disp_ht_prob_away"] = f"{a * 100:.1f}%"
+            if "lambda_ht_home" in prediction:
+                prediction["disp_lambda_ht_home"] = f"{float(prediction['lambda_ht_home']):.2f}"
+                prediction["disp_lambda_ht_away"] = f"{float(prediction['lambda_ht_away']):.2f}"
+            for line, disp in ((0.5, "disp_ht_o05"), (1.5, "disp_ht_o15"), (2.5, "disp_ht_o25")):
+                if prediction.get(disp) in (None, "", "—"):
+                    v = float(prediction.get(f"ht_over_{str(line).replace('.', '')}", float("nan")))
+                    if math.isfinite(v):
+                        prediction[disp] = f"{v * 100:.1f}%"
+        except (TypeError, ValueError, KeyError):
+            pass
+    # Corner markets
+    if prediction.get("disp_corner_total") in (None, "", "—") and "corner_total" in prediction:
+        try:
+            prediction["disp_corner_total"] = f"{float(prediction['corner_total']):.1f}"
+        except (TypeError, ValueError):
+            pass
+    for line in (8.5, 9.5, 10.5, 11.5, 12.5):
+        key = f"corner_over_{str(line).replace('.', '')}"
+        disp = f"disp_{key}"
+        if prediction.get(disp) in (None, "", "—"):
+            try:
+                v = float(prediction.get(key, float("nan")))
+                if math.isfinite(v):
+                    prediction[disp] = f"{v * 100:.1f}%"
+            except (TypeError, ValueError):
+                pass
     if prediction.get("disp_poisson_vs_ensemble") in (None, "", "—"):
         try:
             e_h = float(prediction["prob_home"])
@@ -286,6 +332,7 @@ class State(rx.State):
     gameweek_label: str = "GW32"
     prediction_source: str = ""      # "cache" | "live"
     prediction_source_note: str = "" # reason or timestamp
+    selected_match_idx: int = -1
 
     # User picks for current GW (parallel to predictions list)
     user_picks: list[str] = []   # "" / "H" / "D" / "A"
@@ -325,8 +372,37 @@ class State(rx.State):
         "record": "0-0",
         "settled_count": 0,
         "pending_count": 0,
+        "model_current_bankroll": 1000.0,
+        "model_current_bankroll_disp": "$1000.00",
+        "model_total_pnl": 0.0,
+        "model_total_pnl_disp": "+$0.00",
+        "model_pnl_positive": True,
+        "model_roi_disp": "+0.0%",
+        "model_settled": 0,
+        "model_record": "0-0",
+        "edge_current_bankroll": 1000.0,
+        "edge_current_bankroll_disp": "$1000.00",
+        "edge_total_pnl": 0.0,
+        "edge_total_pnl_disp": "+$0.00",
+        "edge_pnl_positive": True,
+        "edge_roi_disp": "+0.0%",
+        "edge_settled": 0,
+        "edge_record": "0-0",
+        "elo_current_bankroll": 1000.0,
+        "elo_current_bankroll_disp": "$1000.00",
+        "elo_total_pnl": 0.0,
+        "elo_total_pnl_disp": "+$0.00",
+        "elo_pnl_positive": True,
+        "elo_roi_disp": "+0.0%",
+        "elo_settled": 0,
+        "elo_record": "0-0",
     }
     bankroll_ledger: list[dict[str, Any]] = []
+    bankroll_model_ledger: list[dict[str, Any]] = []
+    bankroll_edge_ledger: list[dict[str, Any]] = []
+    bankroll_elo_ledger: list[dict[str, Any]] = []
+    bankroll_pnl_history: list[dict[str, Any]] = []
+    bankroll_selected_wallet: str = ""
     bankroll_suggestions: list[dict[str, Any]] = []
     bankroll_starting_input: str = "1000"
     bankroll_risk_cap_input: str = "5"
@@ -363,6 +439,18 @@ class State(rx.State):
                 if self.user_picks[i] == p.get("model_pick", ""):
                     count += 1
         return count
+
+    @rx.var
+    def selected_match(self) -> dict[str, Any]:
+        if self.selected_match_idx < 0 or self.selected_match_idx >= len(self.predictions):
+            return {}
+        return self.predictions[self.selected_match_idx]
+
+    def select_match(self, idx: int):
+        self.selected_match_idx = idx
+
+    def back_to_matches(self):
+        self.selected_match_idx = -1
 
     @rx.var
     def selected_gw_entry(self) -> dict[str, Any]:
@@ -873,8 +961,17 @@ class State(rx.State):
         except Exception:
             pass
 
-        self.bankroll_summary = {k: v for k, v in summary.items() if k not in ("ledger", "latest_ledger", "suggestions")}
+        excluded = ("ledger", "latest_ledger", "suggestions",
+                    "model_ledger", "latest_model_ledger",
+                    "edge_ledger", "latest_edge_ledger",
+                    "elo_ledger", "latest_elo_ledger",
+                    "pnl_history")
+        self.bankroll_summary = {k: v for k, v in summary.items() if k not in excluded}
         self.bankroll_ledger = summary["latest_ledger"]
+        self.bankroll_model_ledger = summary["latest_model_ledger"]
+        self.bankroll_edge_ledger = summary["latest_edge_ledger"]
+        self.bankroll_elo_ledger = summary["latest_elo_ledger"]
+        self.bankroll_pnl_history = summary["pnl_history"]
         self.bankroll_suggestions = build_current_suggestions(
             self.predictions,
             float(summary["current_bankroll"]),
@@ -882,6 +979,54 @@ class State(rx.State):
         )
         self.bankroll_starting_input = str(summary["starting_bankroll"])
         self.bankroll_risk_cap_input = str(round(float(summary["risk_cap"]) * 100, 2))
+
+    def select_wallet(self, wallet_id: str):
+        self.bankroll_selected_wallet = wallet_id
+
+    def back_to_wallets(self):
+        self.bankroll_selected_wallet = ""
+
+    @rx.var
+    def selected_wallet_entry(self) -> dict[str, Any]:
+        for w in WALLET_DEFS:
+            if w["id"] == self.bankroll_selected_wallet:
+                return w
+        return {}
+
+    @rx.var
+    def selected_wallet_ledger(self) -> list[dict[str, Any]]:
+        if self.bankroll_selected_wallet == "model":
+            return self.bankroll_model_ledger
+        if self.bankroll_selected_wallet == "value":
+            return self.bankroll_ledger
+        if self.bankroll_selected_wallet == "edge":
+            return self.bankroll_edge_ledger
+        if self.bankroll_selected_wallet == "elo":
+            return self.bankroll_elo_ledger
+        return []
+
+    @rx.var
+    def selected_wallet_summary(self) -> dict[str, Any]:
+        prefix = {
+            "model": "model", "value": "", "edge": "edge", "elo": "elo",
+        }.get(self.bankroll_selected_wallet, "")
+        if prefix:
+            return {
+                "balance": self.bankroll_summary[f"{prefix}_current_bankroll_disp"],
+                "pnl": self.bankroll_summary[f"{prefix}_total_pnl_disp"],
+                "positive": self.bankroll_summary[f"{prefix}_pnl_positive"],
+                "roi": self.bankroll_summary[f"{prefix}_roi_disp"],
+                "settled": self.bankroll_summary[f"{prefix}_settled"],
+                "record": self.bankroll_summary[f"{prefix}_record"],
+            }
+        return {
+            "balance": self.bankroll_summary["current_bankroll_disp"],
+            "pnl": self.bankroll_summary["total_pnl_disp"],
+            "positive": self.bankroll_summary["pnl_positive"],
+            "roi": self.bankroll_summary["roi_disp"],
+            "settled": self.bankroll_summary["settled_count"],
+            "record": self.bankroll_summary["record"],
+        }
 
     def update_bankroll_starting(self, value: str):
         self.bankroll_starting_input = value
@@ -1290,7 +1435,6 @@ def match_card(p: dict) -> rx.Component:
                 width="100%",
                 justify="between",
             ),
-            poisson_summary(p),
             explanation_summary(p),
             spacing="3",
             align="center",
@@ -1301,6 +1445,159 @@ def match_card(p: dict) -> rx.Component:
         background_color="#141414",
         border_radius="8px",
         border="1px solid #1e1e1e",
+        on_click=State.select_match(p["match_idx"]),
+        cursor="pointer",
+    )
+
+
+def _kv_row(label: str, value, color: str = "#ddd") -> rx.Component:
+    return rx.hstack(
+        rx.text(label, color="#555", font_size="0.62em", width="96px", flex_shrink="0"),
+        rx.text(value, color=color, font_size="0.72em", font_weight="700"),
+        width="100%",
+        align="center",
+        spacing="2",
+    )
+
+
+def _poisson_group(title: str, rows: list[rx.Component]) -> rx.Component:
+    return rx.box(
+        rx.vstack(
+            section_label(title),
+            *rows,
+            spacing="2",
+            width="100%",
+        ),
+        width="100%",
+        padding="12px 14px",
+        background_color="#101010",
+        border="1px solid #1b1b1b",
+        border_radius="8px",
+    )
+
+
+def match_detail_view() -> rx.Component:
+    p = State.selected_match
+    return rx.vstack(
+        rx.hstack(
+            rx.box(
+                rx.hstack(
+                    rx.icon("chevron-left", size=14, color="#888"),
+                    rx.text("All matches", color="#888", font_size="0.75em"),
+                    spacing="1", align="center",
+                ),
+                on_click=State.back_to_matches,
+                cursor="pointer",
+            ),
+            rx.spacer(),
+            rx.vstack(
+                rx.text(State.gameweek_label, color="white", font_size="0.9em", font_weight="700"),
+                rx.text(p["date"], color="#444", font_size="0.68em"),
+                spacing="0", align="end",
+            ),
+            width="100%",
+            align="center",
+            padding_bottom="4px",
+        ),
+        rx.box(height="1px", width="100%", background_color="#1e1e1e"),
+
+        # Header: teams + model pick + probabilities
+        rx.box(
+            rx.vstack(
+                rx.hstack(
+                    badge_img(p["badge_home"], "34px"),
+                    rx.text(p["home_team"], font_weight="700", font_size="1em", color="white",
+                            flex="1", text_align="right", no_of_lines=1),
+                    rx.text("v", color="#333", font_size="0.85em", padding_x="10px"),
+                    rx.text(p["away_team"], font_weight="700", font_size="1em", color="white",
+                            flex="1", no_of_lines=1),
+                    badge_img(p["badge_away"], "34px"),
+                    width="100%",
+                    align="center",
+                ),
+                rx.hstack(
+                    rx.text("MODEL PICK ", color="#555", font_size="0.58em", letter_spacing="0.1em", font_weight="700"),
+                    rx.text(p["model_pick"], font_size="1.05em", font_weight="700",
+                            color=rx.cond(p["model_pick"] == "H", "#4CAF50",
+                                          rx.cond(p["model_pick"] == "D", "#FFC107", "#F44336"))),
+                    rx.text("·", color="#333", font_size="0.8em"),
+                    rx.text("H ", rx.text.span(p["disp_prob_home"], font_weight="700"), color="#4CAF50", font_size="0.8em"),
+                    rx.text("D ", rx.text.span(p["disp_prob_draw"], font_weight="700"), color="#FFC107", font_size="0.8em"),
+                    rx.text("A ", rx.text.span(p["disp_prob_away"], font_weight="700"), color="#F44336", font_size="0.8em"),
+                    width="100%",
+                    align="center",
+                    spacing="2",
+                ),
+                spacing="2",
+                align="center",
+                width="100%",
+            ),
+            width="100%",
+            padding="14px",
+            background_color="#141414",
+            border="1px solid #1e1e1e",
+            border_radius="8px",
+        ),
+
+        # Grouped Poisson markets
+        _poisson_group("FULL TIME · POISSON (Dixon-Coles)", [
+            _kv_row("λ (home-away)",
+                    rx.hstack(rx.text(p["disp_lambda_home"], font_weight="700"),
+                              rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_lambda_away"], font_weight="700"),
+                              spacing="0", align="center")),
+            _kv_row("Probabilities",
+                    rx.hstack(rx.text("H ", rx.text.span(p["disp_poisson_prob_home"], font_weight="700"), color="#4CAF50", font_size="0.7em"),
+                              rx.text("D ", rx.text.span(p["disp_poisson_prob_draw"], font_weight="700"), color="#FFC107", font_size="0.7em"),
+                              rx.text("A ", rx.text.span(p["disp_poisson_prob_away"], font_weight="700"), color="#F44336", font_size="0.7em"),
+                              spacing="3", align="center")),
+            _kv_row("O1.5 / O2.5 / O3.5 / O4.5",
+                    rx.hstack(rx.text(p["disp_poisson_o15"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_poisson_o25"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_poisson_o35"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_poisson_o45"], font_weight="700"),
+                              spacing="0", align="center"), "#9CCC65"),
+            _kv_row("BTTS", p["disp_poisson_btts"], "#81D4FA"),
+            _kv_row("Top correct scores",
+                    rx.vstack(
+                        rx.foreach(
+                            State.selected_match["poisson_correct_scores"].to(list[dict[str, Any]]),
+                            lambda s: rx.text(s["score"], " · ", rx.text.span(s["disp_p"], font_weight="700"), color="#aaa", font_size="0.68em"),
+                        ),
+                        spacing="1",
+                        width="100%",
+                    )),
+            _kv_row("vs ensemble", p["disp_poisson_vs_ensemble"], "#777"),
+        ]),
+        _poisson_group("HALF TIME · POISSON", [
+            _kv_row("λ (home-away)",
+                    rx.hstack(rx.text(p["disp_lambda_ht_home"], font_weight="700"),
+                              rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_lambda_ht_away"], font_weight="700"),
+                              spacing="0", align="center")),
+            _kv_row("Probabilities",
+                    rx.hstack(rx.text("H ", rx.text.span(p["disp_ht_prob_home"], font_weight="700"), color="#4CAF50", font_size="0.7em"),
+                              rx.text("D ", rx.text.span(p["disp_ht_prob_draw"], font_weight="700"), color="#FFC107", font_size="0.7em"),
+                              rx.text("A ", rx.text.span(p["disp_ht_prob_away"], font_weight="700"), color="#F44336", font_size="0.7em"),
+                              spacing="3", align="center")),
+            _kv_row("O0.5 / O1.5 / O2.5",
+                    rx.hstack(rx.text(p["disp_ht_o05"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_ht_o15"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_ht_o25"], font_weight="700"),
+                              spacing="0", align="center"), "#9CCC65"),
+        ]),
+        _poisson_group("CORNERS · POISSON", [
+            _kv_row("Total λ", p["disp_corner_total"], "#FFB74D"),
+            _kv_row("O8.5 / O9.5 / O10.5 / O11.5 / O12.5",
+                    rx.hstack(rx.text(p["disp_corner_over_85"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_corner_over_95"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_corner_over_105"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_corner_over_115"], font_weight="700"), rx.text("·", color="#333", font_size="0.6em", padding_x="2px"),
+                              rx.text(p["disp_corner_over_125"], font_weight="700"),
+                              spacing="0", align="center"), "#FFB74D"),
+        ]),
+        width="100%",
+        spacing="3",
     )
 
 
@@ -2196,22 +2493,243 @@ def bankroll_suggestion_row(bet: dict) -> rx.Component:
     )
 
 
-def bankroll_tab() -> rx.Component:
+def bankroll_model_row(bet: dict) -> rx.Component:
+    """Single flat-1u MODEL-pick bet (fair odds)."""
+    status_color = rx.cond(
+        bet["status"] == "win", "#4CAF50",
+        rx.cond(bet["status"] == "loss", "#F44336", "#888"),
+    )
+    return rx.box(
+        rx.vstack(
+            rx.hstack(
+                rx.text(bet["gw"], color="#555", font_size="0.65em", font_weight="700"),
+                rx.hstack(
+                    rx.text(bet["home_team"], color="#ddd", font_size="0.72em", no_of_lines=1),
+                    rx.text("vs", color="#444", font_size="0.65em"),
+                    rx.text(bet["away_team"], color="#ddd", font_size="0.72em", no_of_lines=1),
+                    flex="1",
+                    spacing="1",
+                    align="center",
+                ),
+                rx.text(bet["status"], color=status_color, font_size="0.65em", font_weight="700"),
+                width="100%",
+                align="center",
+                spacing="2",
+            ),
+            rx.hstack(
+                rx.text("Pick ", rx.text.span(bet["bet_outcome"], font_weight="700"), color="#aaa", font_size="0.66em"),
+                rx.text("Odds ", rx.text.span(bet["odds"].to_string(), font_weight="700"), color="#777", font_size="0.66em"),
+                rx.text("Stake ", rx.text.span(bet["stake_disp"], font_weight="700"), color="#777", font_size="0.66em"),
+                rx.text("(", rx.text.span(bet["stake_pct_disp"], font_weight="600"), ")",
+                        color="#555", font_size="0.62em"),
+                rx.spacer(),
+                rx.text(bet["pnl_disp"], color=status_color, font_size="0.68em", font_weight="700"),
+                width="100%",
+                align="center",
+            ),
+            spacing="1",
+            width="100%",
+        ),
+        padding="10px 12px",
+        background_color="#101010",
+        border="1px solid #1b1b1b",
+        border_radius="7px",
+        width="100%",
+    )
+
+
+WALLET_DEFS: list[dict[str, str]] = [
+    {
+        "id": "model",
+        "name": "MODEL",
+        "color": "#6C63FF",
+        "method": "Stakes the risk-cap % of the wallet (max 5%) on the model's pick (H/D/A) at its own "
+                  "fair odds (1/prob) for every match. A pure test of whether the model beats its own probabilities.",
+    },
+    {
+        "id": "value",
+        "name": "VALUE KELLY",
+        "color": "#FFB74D",
+        "method": "Kelly-sized stakes (capped by risk cap) on the best positive edge per match — "
+                  "model probability above the bookmaker implied probability — placed at bookmaker odds.",
+    },
+    {
+        "id": "edge",
+        "name": "TOP-4 EDGES",
+        "color": "#9CCC65",
+        "method": "Each gameweek, ranks every match by model-vs-bookmaker probability edge and stakes the "
+                  "risk-cap % (Kelly, capped 5%) on the edge outcome of the 4 biggest edges, at bookmaker odds.",
+    },
+    {
+        "id": "elo",
+        "name": "TOP-4 ELO",
+        "color": "#81D4FA",
+        "method": "Each gameweek, ranks every match by |ELO difference| and stakes the risk-cap % (max 5%) on "
+                  "the ELO favourite (home if elo_diff > 0, away if < 0) of the 4 biggest gaps, at fair odds.",
+    },
+]
+
+
+def pnl_comparison_chart() -> rx.Component:
+    """Cumulative PnL of all wallets per gameweek."""
+    lines = [
+        rx.recharts.line(data_key="model_pnl", stroke="#6C63FF", stroke_width=2, type="monotone"),
+        rx.recharts.line(data_key="value_pnl", stroke="#FFB74D", stroke_width=2, type="monotone"),
+        rx.recharts.line(data_key="edge_pnl", stroke="#9CCC65", stroke_width=2, type="monotone"),
+        rx.recharts.line(data_key="elo_pnl", stroke="#81D4FA", stroke_width=2, type="monotone"),
+    ]
+    return rx.box(
+        rx.vstack(
+            section_label("WALLET P/L OVER TIME  (cumulative per GW)"),
+            rx.recharts.line_chart(
+                rx.recharts.cartesian_grid(stroke="#1e1e1e"),
+                rx.recharts.x_axis(data_key="gw", stroke="#555", font_size=11),
+                rx.recharts.y_axis(stroke="#555", font_size=11),
+                rx.recharts.graphing_tooltip(),
+                rx.recharts.legend(),
+                *lines,
+                data=State.bankroll_pnl_history.to(list[dict[str, Any]]),
+                width="100%",
+                height=240,
+            ),
+            rx.text("■ Model (fair odds)   ■ Value Kelly (book odds)   ■ Top-4 edges   ■ Top-4 ELO",
+                    color="#666", font_size="0.62em"),
+            spacing="2",
+            width="100%",
+        ),
+        width="100%",
+        padding="12px 14px",
+        background_color="#141414",
+        border="1px solid #1e1e1e",
+        border_radius="8px",
+    )
+
+
+def wallet_island(w: dict) -> rx.Component:
+    """Clickable wallet summary card."""
+    prefix = w["id"]
+    is_value = prefix == "value"
+    balance = (State.bankroll_summary["current_bankroll_disp"] if is_value
+               else State.bankroll_summary[f"{prefix}_current_bankroll_disp"])
+    pnl = (State.bankroll_summary["total_pnl_disp"] if is_value
+           else State.bankroll_summary[f"{prefix}_total_pnl_disp"])
+    positive = (State.bankroll_summary["pnl_positive"] if is_value
+                else State.bankroll_summary[f"{prefix}_pnl_positive"])
+    roi = (State.bankroll_summary["roi_disp"] if is_value
+           else State.bankroll_summary[f"{prefix}_roi_disp"])
+    record = (State.bankroll_summary["record"] if is_value
+              else State.bankroll_summary[f"{prefix}_record"])
+    return rx.box(
+        rx.vstack(
+            rx.hstack(
+                rx.text(w["name"], color=w["color"], font_size="0.6em", letter_spacing="0.1em", font_weight="700"),
+                rx.spacer(),
+                rx.icon("chevron-right", size=12, color="#333"),
+                width="100%",
+                align="center",
+            ),
+            rx.text(balance, color="white", font_size="0.95em", font_weight="700"),
+            rx.text("P/L ", pnl, color=rx.cond(positive, "#4CAF50", "#F44336"), font_size="0.72em"),
+            rx.text("ROI ", roi, " · ", record, color="#777", font_size="0.66em"),
+            spacing="1",
+            align="center",
+            width="100%",
+        ),
+        on_click=State.select_wallet(w["id"]),
+        flex="1",
+        padding="12px 10px",
+        background_color="#141414",
+        border=f"1px solid {w['color']}33",
+        border_radius="8px",
+        cursor="pointer",
+    )
+
+
+def bankroll_detail_view() -> rx.Component:
+    """Full detail page for the selected wallet: method + ledger."""
+    entry = State.selected_wallet_entry
+    summary = State.selected_wallet_summary
+    is_value = State.bankroll_selected_wallet == "value"
+    ledger_var = State.selected_wallet_ledger
     return rx.vstack(
         rx.hstack(
-            bankroll_stat("BANKROLL", State.bankroll_summary["current_bankroll_disp"], "white"),
-            bankroll_stat("P/L", State.bankroll_summary["total_pnl_disp"], rx.cond(State.bankroll_summary["pnl_positive"], "#4CAF50", "#F44336")),
-            bankroll_stat("ROI", State.bankroll_summary["roi_disp"], "#FFB74D"),
+            rx.box(
+                rx.hstack(
+                    rx.icon("chevron-left", size=14, color="#888"),
+                    rx.text("All wallets", color="#888", font_size="0.75em"),
+                    spacing="1", align="center",
+                ),
+                on_click=State.back_to_wallets,
+                cursor="pointer",
+            ),
+            rx.spacer(),
+            rx.vstack(
+                rx.text(entry["name"], color=entry["color"], font_size="0.9em", font_weight="700"),
+                rx.text("method + bet history", color="#555", font_size="0.62em"),
+                spacing="0", align="end",
+            ),
             width="100%",
-            spacing="2",
+            align="center",
+            padding_bottom="4px",
+        ),
+        rx.box(height="1px", width="100%", background_color="#1e1e1e"),
+        rx.box(
+            rx.vstack(
+                rx.text("HOW IT WORKS", color="#555", font_size="0.58em", letter_spacing="0.1em", font_weight="700"),
+                rx.text(entry["method"], color="#aaa", font_size="0.72em", line_height="1.4"),
+                spacing="2",
+                width="100%",
+            ),
+            width="100%",
+            padding="12px 14px",
+            background_color="#101010",
+            border="1px solid #1b1b1b",
+            border_radius="8px",
         ),
         rx.hstack(
-            bankroll_stat("RECORD", State.bankroll_summary["record"], "#aaa"),
-            bankroll_stat("PENDING", State.bankroll_summary["pending_count"].to_string(), "#888"),
-            bankroll_stat("RISK CAP", State.bankroll_summary["risk_cap_disp"], "#6C63FF"),
+            bankroll_stat("BALANCE", summary["balance"], "white"),
+            bankroll_stat("P/L", summary["pnl"], rx.cond(summary["positive"], "#4CAF50", "#F44336")),
+            bankroll_stat("ROI", summary["roi"], "#FFB74D"),
+            bankroll_stat("RECORD", summary["record"], "#aaa"),
             width="100%",
             spacing="2",
         ),
+        section_label("BET HISTORY"),
+        rx.cond(
+            ledger_var.length() == 0,
+            rx.text("No bets yet — they appear after the gameweek is archived and results are synced.",
+                    color="#444", font_size="0.75em"),
+            rx.cond(
+                is_value,
+                rx.vstack(rx.foreach(ledger_var.to(list[dict[str, Any]]), bankroll_bet_row),
+                          width="100%", spacing="2"),
+                rx.vstack(rx.foreach(ledger_var.to(list[dict[str, Any]]), bankroll_model_row),
+                          width="100%", spacing="2"),
+            ),
+        ),
+        width="100%",
+        spacing="3",
+    )
+
+
+def bankroll_tab() -> rx.Component:
+    return rx.cond(
+        State.bankroll_selected_wallet != "",
+        bankroll_detail_view(),
+        rx.vstack(
+            rx.hstack(
+                *[wallet_island(w) for w in WALLET_DEFS],
+                width="100%",
+                spacing="2",
+            ),
+            rx.hstack(
+                bankroll_stat("VALUE PENDING", State.bankroll_summary["pending_count"].to_string(), "#888"),
+                bankroll_stat("MODEL SETTLED", State.bankroll_summary["model_settled"].to_string(), "#aaa"),
+                bankroll_stat("RISK CAP", State.bankroll_summary["risk_cap_disp"], "#6C63FF"),
+                width="100%",
+                spacing="2",
+            ),
+            pnl_comparison_chart(),
         rx.box(
             rx.vstack(
                 section_label("BANKROLL SETTINGS"),
@@ -2231,7 +2749,7 @@ def bankroll_tab() -> rx.Component:
                         spacing="1",
                     ),
                     rx.vstack(
-                        rx.text("Max % of bankroll to stake per bet (safety limit).", color="#777", font_size="0.68em"),
+                        rx.text("Max % of wallet to stake per bet — applies to all wallets (Kelly capped here).", color="#777", font_size="0.68em"),
                         rx.input(
                             value=State.bankroll_risk_cap_input,
                             on_change=State.update_bankroll_risk_cap,
@@ -2268,18 +2786,10 @@ def bankroll_tab() -> rx.Component:
                 spacing="2",
             ),
         ),
-        section_label("LEDGER"),
-        rx.cond(
-            State.bankroll_ledger.length() == 0,
-            rx.text("No bankroll bets yet. Run the pipeline with bookmaker odds to populate suggestions.", color="#444", font_size="0.75em"),
-            rx.vstack(
-                rx.foreach(State.bankroll_ledger.to(list[dict[str, Any]]), bankroll_bet_row),
-                width="100%",
-                spacing="2",
-            ),
-        ),
+        rx.text("Tap a wallet to see its method and full bet history.", color="#444", font_size="0.68em"),
         width="100%",
         spacing="3",
+        ),
     )
 
 
@@ -2337,7 +2847,11 @@ def navbar() -> rx.Component:
 def index() -> rx.Component:
     content = rx.cond(
         State.current_tab == "home",
-        home_tab(),
+        rx.cond(
+            State.selected_match_idx >= 0,
+            match_detail_view(),
+            home_tab(),
+        ),
         rx.cond(
             State.current_tab == "predictor",
             predictor_tab(),

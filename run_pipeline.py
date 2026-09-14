@@ -549,9 +549,10 @@ def main():
             next_gw = int(future.iloc[0][gw_col])
 
         # Optional prompt: allow choosing ANY gameweek (past/current/future).
-        # (Keeps --gw for scripted/non-interactive usage.)
+        # (Keeps --gw for scripted/non-interactive usage.) Guarded against EOF so
+        # scheduled/headless runs (Task Scheduler) never crash on input().
         chosen_gw = next_gw
-        if sys.stdin.isatty():
+        if sys.stdin.isatty() and not os.environ.get("AUGO_NON_INTERACTIVE"):
             try:
                 available = (
                     df_fix[gw_col]
@@ -568,7 +569,10 @@ def main():
                 print(f"Auto-selected gameweek: GW{int(next_gw)}")
                 print("Available gameweeks:", ", ".join(f"GW{g}" for g in available[:20]) +
                       (" …" if len(available) > 20 else ""))
-                raw = input("Enter any GW number to simulate (or press Enter to keep selected): ").strip()
+                try:
+                    raw = input("Enter any GW number to simulate (or press Enter to keep selected): ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    raw = ""   # no interactive input -> keep auto-selected GW
                 if raw:
                     try:
                         gw_int = int(raw)
@@ -605,9 +609,6 @@ def main():
             selected_cols.append(col)
     upcoming = selected[selected_cols].copy().reset_index(drop=True)
     upcoming = compute_current_elo(upcoming, df_elo)
-    # Optional: adjust ELO for injuries/suspensions before scoring (see lineups.py)
-    from lineups import apply_availability_if_enabled
-    upcoming = apply_availability_if_enabled(upcoming)
     upcoming = run_model(upcoming, model, df_elo)
     upcoming = add_poisson_outputs(upcoming, goal_model_home, goal_model_away, df_elo)
     if ht_model_home is not None and ht_model_away is not None:
@@ -644,9 +645,14 @@ def main():
     if gw_match:
         os.makedirs(HISTORY_DIR, exist_ok=True)
         archive_path = os.path.join(HISTORY_DIR, f"GW{gw_match.group(0)}.json")
-        with open(archive_path, "w", encoding="utf-8") as f:
-            json.dump(cache, f, indent=2)
-        print(f"   Archived snapshot → {archive_path}")
+        # Never overwrite an existing archive: it may hold bookmaker odds fetched
+        # pre-match (unavailable once matches start) and drives wallet/grading.
+        if os.path.exists(archive_path):
+            print(f"   Archive {archive_path} already exists — kept (cache only updated).")
+        else:
+            with open(archive_path, "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=2)
+            print(f"   Archived snapshot → {archive_path}")
 
     print(f"\n{'─'*72}")
     print(f"{'HOME':<26}  {'AWAY':<26}  H%    D%    A%   Pick")

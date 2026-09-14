@@ -203,8 +203,10 @@ def add_fatigue_features(df: pd.DataFrame) -> pd.DataFrame:
         last_match[h] = date
         last_match[a] = date
 
-    df["home_rest_days"] = home_rest
-    df["away_rest_days"] = away_rest
+    # Clip: multi-season gaps (promoted teams) are just "no congestion"; anything
+    # over 30 days carries no additional signal and would skew linear models.
+    df["home_rest_days"] = np.clip(home_rest, 0, 30)
+    df["away_rest_days"] = np.clip(away_rest, 0, 30)
     df["rest_advantage"] = df["home_rest_days"] - df["away_rest_days"]
     df["home_fatigued"] = (df["home_rest_days"] <= 3).astype(int)
     df["away_fatigued"] = (df["away_rest_days"] <= 3).astype(int)

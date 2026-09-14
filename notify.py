@@ -89,9 +89,27 @@ def build_weekly_summary() -> str:
     for p in preds:
         h, d, a = _f(p.get("prob_home")), _f(p.get("prob_draw")), _f(p.get("prob_away"))
         pick = str(p.get("model_pick", "?"))
+        o15 = str(p.get("disp_poisson_o15", "—"))
+        o25 = str(p.get("disp_poisson_o25", "—"))
+        o35 = str(p.get("disp_poisson_o35", "—"))
+        ht_lam = (f"HT λ {p.get('disp_lambda_ht_home', '—')}-{p.get('disp_lambda_ht_away', '—')}"
+                  if p.get("disp_lambda_ht_home", "—") != "—" else "")
+        ht_o15 = str(p.get("disp_ht_o15", "—"))
+        cor_tot = str(p.get("disp_corner_total", "—"))
+        cor_o95 = str(p.get("disp_corner_over_95", "—"))
+        cor_o105 = str(p.get("disp_corner_over_105", "—"))
         line = (f"  {p.get('home_team', '?')} v {p.get('away_team', '?')} → "
                 f"[{pick}]  H {h*100:.0f}% · D {d*100:.0f}% · A {a*100:.0f}%")
         lines.append(line)
+        extras = []
+        if o15 != "—" or o25 != "—" or o35 != "—":
+            extras.append(f"O1.5 {o15} · O2.5 {o25} · O3.5 {o35}")
+        if ht_lam:
+            extras.append(f"{ht_lam} · HT O1.5 {ht_o15}")
+        if cor_tot != "—":
+            extras.append(f"COR {cor_tot} · O9.5 {cor_o95} · O10.5 {cor_o105}")
+        if extras:
+            lines.append("      " + "  |  ".join(extras))
         if max(h, d, a) >= 0.65:
             safe.append(f"  • {p.get('home_team')} v {p.get('away_team')} → {pick} ({max(h,d,a)*100:.0f}%)")
 

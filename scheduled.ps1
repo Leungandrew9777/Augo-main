@@ -13,6 +13,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
+$env:AUGO_NON_INTERACTIVE = "1"   # never prompt for GW in headless runs
 
 $logDir = Join-Path $PSScriptRoot "logs"
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
@@ -25,6 +26,7 @@ try {
         python sync.py results --days 2
         python evaluate.py --json
         python notify.py --results
+        python publish.py --push      # push results/eval to GitHub raw so the deployed app updates
     } else {
         python sync.py all
         python run_pipeline.py

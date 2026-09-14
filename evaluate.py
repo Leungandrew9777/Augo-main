@@ -142,6 +142,36 @@ def _is_value(r: dict) -> bool:
     return r["probs"][r["model_pick"]] > book_p[r["model_pick"]] + 0.005
 
 
+def _metrics(sub: pd.DataFrame) -> dict[str, Any]:
+    """Accuracy / log-loss / Brier / ECE / ROIs for a set of settled records."""
+    if sub.empty:
+        return {}
+    probs = np.array([[
+        sub.iloc[j]["probs"][o] for o in OUTCOMES
+    ] for j in range(len(sub))])
+    y = np.array([OUTCOMES.index(a) for a in sub["actual"]])
+    pred = np.array([OUTCOMES.index(mp) for mp in sub["model_pick"]])
+    acc = float(np.mean(pred == y))
+    ll = float(-np.mean(np.log(np.clip(probs[np.arange(len(y)), y], 1e-12, None))))
+    br = brier_multiclass(probs, y)
+    ece, _rows = expected_calibration_error(probs, y)
+    fair_roi = float(np.nanmean([_roi_fair(r) for r in sub.to_dict("records")]))
+    book_roi = float(np.nanmean([_roi_book(r) for r in sub.to_dict("records")]))
+    value = [r for r in sub.to_dict("records") if _is_value(r)]
+    value_roi = float(np.nanmean([_roi_book(r) for r in value])) if value else float("nan")
+    return {
+        "matches": len(sub),
+        "accuracy": acc,
+        "log_loss": ll,
+        "brier": br,
+        "ece": ece,
+        "roi_fair": fair_roi,
+        "roi_book": book_roi,
+        "value_bets": len(value),
+        "roi_value": value_roi,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true", help="write evaluation_report.json")
@@ -153,34 +183,6 @@ def main() -> None:
         return
 
     df = pd.DataFrame(records)
-
-    def _metrics(sub: pd.DataFrame) -> dict[str, Any]:
-        if sub.empty:
-            return {}
-        probs = np.array([[
-            sub.iloc[j]["probs"][o] for o in OUTCOMES
-        ] for j in range(len(sub))])
-        y = np.array([OUTCOMES.index(a) for a in sub["actual"]])
-        pred = np.array([OUTCOMES.index(mp) for mp in sub["model_pick"]])
-        acc = float(np.mean(pred == y))
-        ll = float(-np.mean(np.log(np.clip(probs[np.arange(len(y)), y], 1e-12, None))))
-        br = brier_multiclass(probs, y)
-        ece, _rows = expected_calibration_error(probs, y)
-        fair_roi = float(np.nanmean([_roi_fair(r) for r in sub.to_dict("records")]))
-        book_roi = float(np.nanmean([_roi_book(r) for r in sub.to_dict("records")]))
-        value = [r for r in sub.to_dict("records") if _is_value(r)]
-        value_roi = float(np.nanmean([_roi_book(r) for r in value])) if value else float("nan")
-        return {
-            "matches": len(sub),
-            "accuracy": acc,
-            "log_loss": ll,
-            "brier": br,
-            "ece": ece,
-            "roi_fair": fair_roi,
-            "roi_book": book_roi,
-            "value_bets": len(value),
-            "roi_value": value_roi,
-        }
 
     print("=" * 78)
     print("AUGO MODEL EVALUATION  (predictions_history + results.csv)")

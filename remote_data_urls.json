@@ -1,4 +1,4 @@
 {
-  "predictions_cache_url": "${AUGO_RAW_BASE}/predictions_cache.json",
-  "results_url": "${AUGO_RAW_BASE}/results.csv"
+  "predictions_cache_url": "https://raw.githubusercontent.com/Leungandrew9777/augo-data/main/predictions_cache.json",
+  "results_url": "https://raw.githubusercontent.com/Leungandrew9777/augo-data/main/results.csv"
 }
