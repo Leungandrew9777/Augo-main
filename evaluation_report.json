@@ -1,23 +1,23 @@
 {
   "cumulative": {
-    "matches": 9,
-    "accuracy": 0.3333333333333333,
-    "log_loss": 1.036743271812525,
-    "brier": 0.2081597455123943,
-    "ece": 0.3223578184480199,
-    "roi_fair": -0.3093364433098508,
+    "matches": 10,
+    "accuracy": 0.3,
+    "log_loss": 1.0767335903564716,
+    "brier": 0.21642784804078521,
+    "ece": 0.3303857830310632,
+    "roi_fair": -0.3784027989788657,
     "roi_book": NaN,
     "value_bets": 0,
     "roi_value": NaN
   },
   "per_gameweek": {
     "4": {
-      "matches": 9,
-      "accuracy": 0.3333333333333333,
-      "log_loss": 1.036743271812525,
-      "brier": 0.2081597455123943,
-      "ece": 0.3223578184480199,
-      "roi_fair": -0.3093364433098508,
+      "matches": 10,
+      "accuracy": 0.3,
+      "log_loss": 1.0767335903564716,
+      "brier": 0.21642784804078521,
+      "ece": 0.3303857830310632,
+      "roi_fair": -0.3784027989788657,
       "roi_book": NaN,
       "value_bets": 0,
       "roi_value": NaN
