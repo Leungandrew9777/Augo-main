@@ -1,15 +1,17 @@
 name: Augo automation
 
 # Runs the Augo pipeline in the cloud so it keeps working when your PC is off.
-#   weekly  : sync fixtures+results -> predict -> notify -> publish   (Friday 17:00 Asia/HK)
-#   daily   : sync results -> evaluate -> notify -> publish           (09:00 Asia/HK)
+#   weekly  : sync fixtures+results -> predict -> notify   (Friday 17:00 Asia/HK)
+#   daily   : sync results -> evaluate -> notify           (09:00 Asia/HK)
 # Times are UTC on GitHub; Asia/Hong_Kong = UTC+8.
+#
+# Publishing to the deployed app's data repo is handled locally by the
+# scheduler (`publish.py --push`), so this workflow no longer does it.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
 #   ODDS_API_KEY       The Odds API key
 #   TELEGRAM_BOT_TOKEN Telegram bot token
 #   TELEGRAM_CHAT_ID   Telegram chat id
-#   AUGO_GIT_TOKEN     fine-grained PAT with Contents:Read+Write on Leungandrew9777/augo-data
 
 on:
   schedule:
@@ -89,14 +91,3 @@ jobs:
           git commit -m "update Augo data (ci)" --allow-empty || echo "no changes to commit"
           git push
 
-      - name: Publish to data repo (deployed app)
-        run: |
-          git clone --quiet https://x-access-token:${{ secrets.AUGO_GIT_TOKEN }}@github.com/Leungandrew9777/augo-data.git data_repo
-          cp predictions_cache.json results.csv evaluation_report.json data_repo/ 2>/dev/null || true
-          cd data_repo
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "update Augo data" --allow-empty || echo "no changes"
-          git push --quiet
-          echo "Published to augo-data."
