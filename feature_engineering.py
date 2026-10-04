@@ -85,48 +85,44 @@ class FeatureEngineer:
             v["Form"] = v["Points"].shift(1).rolling(self.window, min_periods=3).mean()
             return v
 
-        frames = []
-        for team in all_records["Team"].unique():
-            team_data = all_records[all_records["Team"] == team]
-            for is_home in (1, 0):
-                venue = team_data[team_data["IsHome"] == is_home]
-                if venue.empty:
-                    continue
-                frames.append(_venue_stats(venue))
+        frames = [
+            _venue_stats(venue)
+            for _, venue in all_records.groupby(["Team", "IsHome"], sort=False)
+            if not venue.empty
+        ]
+        if not frames:
+            return all_records
         return pd.concat(frames).sort_values("Date").reset_index(drop=True)
 
     def build_match_features(self, df: pd.DataFrame) -> pd.DataFrame:
         team_stats = self.compute_team_stats(df)
         stat_features = [c for c in team_stats.columns if c.startswith("avg_")] + ["Form"]
 
-        features_list = []
-        for idx, match in df.iterrows():
-            home = match["HomeTeam"]
-            away = match["AwayTeam"]
-            date = match["Date"]
+        home_stats = team_stats.loc[
+            team_stats["IsHome"] == 1, ["Team", "Date"] + stat_features
+        ].rename(columns={"Team": "HomeTeam", **{c: f"home_{c}" for c in stat_features}})
+        away_stats = team_stats.loc[
+            team_stats["IsHome"] == 0, ["Team", "Date"] + stat_features
+        ].rename(columns={"Team": "AwayTeam", **{c: f"away_{c}" for c in stat_features}})
 
-            home_stats = team_stats[(team_stats["Team"] == home) & (team_stats["Date"] == date) & (team_stats["IsHome"] == 1)]
-            away_stats = team_stats[(team_stats["Team"] == away) & (team_stats["Date"] == date) & (team_stats["IsHome"] == 0)]
-
-            if home_stats.empty or away_stats.empty:
-                continue
-
-            row = {"match_idx": idx}
-            for feat in stat_features:
-                h_val = home_stats[feat].values[0]
-                a_val = away_stats[feat].values[0]
-                row[f"home_{feat}"] = h_val
-                row[f"away_{feat}"] = a_val
-                row[f"diff_{feat}"] = h_val - a_val
-            features_list.append(row)
-
-        features_df = pd.DataFrame(features_list).set_index("match_idx")
+        base = df.reset_index(drop=True)
+        feature_frame = base[["Date", "HomeTeam", "AwayTeam"]].merge(
+            home_stats, on=["Date", "HomeTeam"], how="left",
+        ).merge(
+            away_stats, on=["Date", "AwayTeam"], how="left",
+        )
+        for feat in stat_features:
+            feature_frame[f"diff_{feat}"] = (
+                feature_frame[f"home_{feat}"] - feature_frame[f"away_{feat}"]
+            )
+        feature_frame = feature_frame.drop(columns=["Date", "HomeTeam", "AwayTeam"])
+        result = pd.concat([base, feature_frame], axis=1)
         # Only drop rows without a computed ELO diff. Rolling venue stats can be
         # NaN for new teams / early-season games (not enough history), and the
         # trainer median-fills them; dropping on all features would silently
         # remove brand-new promoted teams entirely.
-        core = [c for c in ("elo_diff",) if c in features_df.columns]
-        return df.join(features_df, how="inner").dropna(subset=core)
+        core = [c for c in ("elo_diff",) if c in result.columns]
+        return result.dropna(subset=core)
 
 
 class FootballELO:
@@ -215,50 +211,44 @@ def add_fatigue_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_h2h_features(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     """For each match, look back at the last *n* meetings between the same two
-    teams (either direction) and compute stats from the home team's perspective."""
+    teams (either direction) and compute stats from the home team's perspective.
+
+    Vectorised: matches are keyed by the unordered pair of teams, then a shifted
+    rolling window per pair reproduces the original per-row ``tail(n)`` scan.
+    """
     df = df.copy()
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True, format="mixed")
-    df = df.sort_values("Date")
-    h2h_wins = []
-    h2h_draws = []
-    h2h_avg_goals = []
+    df = df.sort_values("Date").reset_index(drop=True)
 
-    for _, row in df.iterrows():
-        h, a, date = row["HomeTeam"], row["AwayTeam"], row["Date"]
-        prior = df[
-            (df["Date"] < date)
-            & (
-                ((df["HomeTeam"] == h) & (df["AwayTeam"] == a))
-                | ((df["HomeTeam"] == a) & (df["AwayTeam"] == h))
-            )
-        ].tail(n)
+    home = df["HomeTeam"].astype(str)
+    away = df["AwayTeam"].astype(str)
+    first_is_home = home.str.casefold() <= away.str.casefold()
+    canon_home = home.where(first_is_home, away)
+    canon_away = away.where(first_is_home, home)
 
-        if prior.empty:
-            h2h_wins.append(np.nan)
-            h2h_draws.append(np.nan)
-            h2h_avg_goals.append(np.nan)
-            continue
+    hg = pd.to_numeric(df["FTHG"], errors="coerce")
+    ag = pd.to_numeric(df["FTAG"], errors="coerce")
+    canon_hg = hg.where(first_is_home, ag)
+    canon_ag = ag.where(first_is_home, hg)
 
-        wins = 0
-        draws = 0
-        total_goals = 0
-        for _, p in prior.iterrows():
-            gh = int(p["FTHG"])
-            ga = int(p["FTAG"])
-            total_goals += gh + ga
-            if p["HomeTeam"] == h:
-                wins += gh > ga
-                draws += gh == ga
-            else:
-                wins += ga > gh
-                draws += gh == ga
-        h2h_wins.append(wins / len(prior))
-        h2h_draws.append(draws / len(prior))
-        h2h_avg_goals.append(total_goals / len(prior))
+    work = pd.DataFrame({
+        "pair": canon_home + "|" + canon_away,
+        "canon_win": (canon_hg > canon_ag).astype(float),
+        "draw": (canon_hg == canon_ag).astype(float),
+        "total": (hg + ag).astype(float),
+    })
+    grouped = work.groupby("pair", sort=False)
 
-    df["h2h_home_wins"] = h2h_wins
-    df["h2h_draws"] = h2h_draws
-    df["h2h_total_goals_avg"] = h2h_avg_goals
+    def _prior_mean(s: pd.Series) -> pd.Series:
+        return s.shift(1).rolling(n, min_periods=1).mean()
+
+    win_roll = grouped["canon_win"].transform(_prior_mean)
+    draw_roll = grouped["draw"].transform(_prior_mean)
+    total_roll = grouped["total"].transform(_prior_mean)
+
+    df["h2h_home_wins"] = win_roll.where(first_is_home, 1.0 - win_roll - draw_roll)
+    df["h2h_draws"] = draw_roll
+    df["h2h_total_goals_avg"] = total_roll
     return df
 
 

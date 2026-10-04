@@ -138,12 +138,12 @@ def build_weekly_summary() -> str:
 def build_results_summary() -> str:
     try:
         import evaluate as ev
-        records, _ = ev._collect()
+        records, _ = ev.collect()
         if not records:
             return "Augo: no graded matches yet (predictions_history + results.csv)."
         import pandas as pd
         df = pd.DataFrame(records)
-        m = ev._metrics(df)
+        m = ev.metrics(df)
         return ("📊 Augo grading update\n"
                 f"  settled matches: {m['matches']}\n"
                 f"  model accuracy: {m['accuracy']:.1%}\n"

@@ -104,6 +104,12 @@ def main() -> None:
     rows = []
     for _, m in matches.iterrows():
         ftr = "H" if m["home_goals"] > m["away_goals"] else ("A" if m["home_goals"] < m["away_goals"] else "D")
+        # Understat has no half-time goals. Leaving them NaN would feed NaN
+        # targets into the HT count models, so approximate with the usual
+        # ~45% first-half share instead.
+        hthg = int(round(float(m["home_goals"]) * 0.45))
+        htag = int(round(float(m["away_goals"]) * 0.45))
+        htr = "H" if hthg > htag else ("A" if hthg < htag else "D")
         row = {
             "Date": m["date"],
             "HomeTeam": m["home_team"],
@@ -111,7 +117,7 @@ def main() -> None:
             "FTHG": m["home_goals"],
             "FTAG": m["away_goals"],
             "FTR": ftr,
-            "HTHG": np.nan, "HTAG": np.nan, "HTR": np.nan,
+            "HTHG": hthg, "HTAG": htag, "HTR": htr,
         }
         for col in STAT_COLS:
             row[col] = medians.get(col, np.nan)

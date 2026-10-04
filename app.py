@@ -1,8 +1,8 @@
 import reflex as rx
 import pandas as pd
-import numpy as np
 import joblib
 import json
+import logging
 import os
 import re
 import math
@@ -12,6 +12,8 @@ from typing import Any
 import requests
 
 from persistence import (
+    archive_predictions,
+    gw_from_label,
     load_archived_predictions,
     load_bankroll,
     load_results,
@@ -19,16 +21,31 @@ from persistence import (
     save_bankroll,
     upsert_user_picks_for_gw,
 )
-from bankroll import build_bankroll, build_current_suggestions, format_money
+from bankroll import (
+    WALLETS,
+    build_bankroll,
+    build_current_suggestions,
+    default_bankroll_summary,
+    format_money,
+)
 from explanations import build_explanation
-from team_aliases import badge_lookup_key
-from data_urls import predictions_cache_url
+from data_urls import predictions_cache_url, remote_first
+from display import format_odds_display
+from features import compute_current_elo
+from inference import (
+    add_corner_outputs,
+    add_ht_outputs,
+    add_poisson_outputs,
+    predict_matches,
+)
+from league import FALLBACK_BADGE, PL_TEAMS
+
+logger = logging.getLogger("augo")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-ODDS_DISPLAY_CAP = 200.0
 CACHE_FILE = os.path.join(APP_DIR, "predictions_cache.json")
 
 
@@ -55,166 +72,48 @@ def _cache_max_age_hours() -> float:
 CACHE_MAX_AGE_HOURS = _cache_max_age_hours()
 
 
-def _local_today_hk() -> pd.Timestamp:
-    """Return today's date normalized in Hong Kong (UTC+8) time."""
+def _fixture_today_uk() -> pd.Timestamp:
+    """Return today's date in match-local time (Europe/London).
+
+    fixtures.csv dates are UK calendar dates, so gameweek rollover must be
+    evaluated against the UK date — not the viewer's date. Using Asia/Hong_Kong
+    (UTC+8) flips to the next gameweek up to 8h early: e.g. on Mon 2026-09-14
+    ~17:40 UTC the UK date is still Sep 14 (Leeds v Newcastle still to play)
+    while the HK date is already Sep 15, which wrongly advances GW4 → GW5 and
+    forces live inference instead of the GW4 cache.
+    """
     try:
         from zoneinfo import ZoneInfo
 
-        return pd.Timestamp(dt.datetime.now(ZoneInfo("Asia/Hong_Kong")).date())
+        return pd.Timestamp(dt.datetime.now(ZoneInfo("Europe/London")).date())
     except Exception:
-        return pd.Timestamp.today().normalize()
+        try:
+            return pd.Timestamp(
+                dt.datetime.now(dt.timezone.utc).date()
+            )
+        except Exception:
+            return pd.Timestamp.today().normalize()
 
 
-def format_odds_display(v: float, cap: float = ODDS_DISPLAY_CAP) -> str:
-    """Format odds for UI display without scientific notation."""
+# ── Process-wide artifact cache ───────────────────────────────────────────────
+# State events fire often; re-reading the pickles and the multi-MB ELO CSV on
+# every event is wasteful. Cache until any backing file's mtime changes.
+
+_ARTIFACT_CACHE: dict[tuple[str, ...], tuple[tuple, object]] = {}
+
+
+def _load_artifact(loader, *paths: str):
     try:
-        x = float(v)
-    except (TypeError, ValueError):
-        return f"{cap:.0f}"
+        key = tuple((p, os.path.getmtime(p)) for p in paths)
+    except OSError:
+        return loader()
+    cached = _ARTIFACT_CACHE.get(paths)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    value = loader()
+    _ARTIFACT_CACHE[paths] = (key, value)
+    return value
 
-    if not math.isfinite(x):
-        return f"{cap:.0f}"
-
-    if x >= cap:
-        return f"{cap:.0f}"
-    if x >= 10:
-        return f"{x:.1f}".rstrip("0").rstrip(".")
-    if x >= 1:
-        return f"{x:.2f}".rstrip("0").rstrip(".")
-    return f"{x:.3f}".rstrip("0").rstrip(".")
-
-PL_TEAMS: list[str] = sorted([
-    "Arsenal", "Aston Villa", "Bournemouth", "Brentford",
-    "Brighton & Hove Albion", "Chelsea", "Coventry City", "Crystal Palace",
-    "Everton", "Fulham", "Hull City", "Ipswich Town", "Leeds United",
-    "Liverpool", "Manchester City", "Manchester United", "Newcastle",
-    "Nottingham Forest", "Sunderland", "Tottenham Hotspur",
-])
-
-TEAM_BADGES: dict[str, str] = {
-    "Arsenal":                    "https://resources.premierleague.com/premierleague/badges/t3.png",
-    "Aston Villa":                "https://resources.premierleague.com/premierleague/badges/t7.png",
-    "Bournemouth":                "https://resources.premierleague.com/premierleague/badges/t91.png",
-    "Brentford":                  "https://resources.premierleague.com/premierleague/badges/t94.png",
-    "Brighton & Hove Albion":     "https://resources.premierleague.com/premierleague/badges/t36.png",
-    "Burnley":                    "https://resources.premierleague.com/premierleague/badges/t90.png",
-    "Chelsea":                    "https://resources.premierleague.com/premierleague/badges/t8.png",
-    "Coventry City":              "https://resources.premierleague.com/premierleague25/badges-alt/9.svg",
-    "Crystal Palace":             "https://resources.premierleague.com/premierleague/badges/t31.png",
-    "Everton":                    "https://resources.premierleague.com/premierleague/badges/t11.png",
-    "Fulham":                     "https://resources.premierleague.com/premierleague/badges/t54.png",
-    "Hull City":                  "https://resources.premierleague.com/premierleague25/badges-alt/88.svg",
-    "Ipswich Town":               "https://resources.premierleague.com/premierleague25/badges-alt/40.svg",
-    "Leeds United":               "https://resources.premierleague.com/premierleague/badges/t2.png",
-    "Liverpool":                  "https://resources.premierleague.com/premierleague/badges/t14.png",
-    "Manchester City":            "https://resources.premierleague.com/premierleague/badges/t43.png",
-    "Manchester United":          "https://resources.premierleague.com/premierleague/badges/t1.png",
-    "Newcastle":                  "https://resources.premierleague.com/premierleague/badges/t4.png",
-    "Nottingham Forest":          "https://resources.premierleague.com/premierleague/badges/t17.png",
-    "Sunderland":                 "https://resources.premierleague.com/premierleague/badges/t56.png",
-    "Tottenham Hotspur":          "https://resources.premierleague.com/premierleague/badges/t6.png",
-    "West Ham United":            "https://resources.premierleague.com/premierleague/badges/t21.png",
-    "Wolverhampton Wanderers":    "https://resources.premierleague.com/premierleague/badges/t39.png",
-}
-
-FALLBACK_BADGE = "https://resources.premierleague.com/premierleague/badges/t0.png"
-
-FALLBACK_FIXTURES: list[dict] = [
-    {"idx": 0, "date": "2026-04-11", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 1, "date": "2026-04-11", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 2, "date": "2026-04-11", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 3, "date": "2026-04-11", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 4, "date": "2026-04-12", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 5, "date": "2026-04-12", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 6, "date": "2026-04-12", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 7, "date": "2026-04-12", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 8, "date": "2026-04-12", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-    {"idx": 9, "date": "2026-04-14", "home_team": "Arsenal",             "away_team": "Bournemouth"},
-]
-
-from typing import TypedDict
-
-class MatchDict(TypedDict):
-    home_team: str
-    away_team: str
-    badge_home: str
-    badge_away: str
-    disp_odds_home: str
-    disp_odds_draw: str
-    disp_odds_away: str
-    disp_prob_home: str
-    disp_prob_draw: str
-    disp_prob_away: str
-    prob_home: float
-    prob_draw: float
-    prob_away: float
-    fair_odds_home: float
-    fair_odds_draw: float
-    fair_odds_away: float
-    actual: str
-    user_pick: str
-    model_pick: str
-
-class GWDict(TypedDict):
-    idx: int
-    gw: str
-    date: str
-    matches: list[MatchDict]
-    model_accuracy: str
-    user_accuracy: str
-    pnl: str
-    pnl_positive: bool
-
-class FixtureDict(TypedDict):
-    idx: int
-    date: str
-    home_team: str
-    away_team: str
-
-class PredictionDict(TypedDict):
-    match_idx: int
-    home_team: str
-    away_team: str
-    badge_home: str
-    badge_away: str
-    disp_odds_home: str
-    disp_odds_draw: str
-    disp_odds_away: str
-    disp_prob_home: str
-    disp_prob_draw: str
-    disp_prob_away: str
-    prob_home: float
-    prob_draw: float
-    prob_away: float
-    fair_odds_home: float
-    fair_odds_draw: float
-    fair_odds_away: float
-    book_odds_home: float | None
-    book_odds_draw: float | None
-    book_odds_away: float | None
-    book_prob_home: float | None
-    book_prob_draw: float | None
-    book_prob_away: float | None
-    disp_book_odds_home: str
-    disp_book_odds_draw: str
-    disp_book_odds_away: str
-    disp_book_prob_home: str
-    disp_book_prob_draw: str
-    disp_book_prob_away: str
-    disp_elo_diff: str
-    chart_label: str
-    model_pick: str
-
-class ChartBarDict(TypedDict):
-    label: str
-    home: float
-    draw: float
-    away: float
-
-class EloChartDict(TypedDict):
-    label: str
-    elo_diff: float
-    elo_positive: bool
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -230,80 +129,108 @@ def _norm_fixture_date_for_sig(val: Any) -> str:
     return str(ts.normalize().date())
 
 
-def _backfill_poisson_display_fields(prediction: dict[str, Any]) -> None:
-    """Derive Σλ / O2.5 / BTTS / vs-ensemble strings when missing (older caches)."""
-    try:
-        lh = float(prediction.get("lambda_home", 0.0))
-        la = float(prediction.get("lambda_away", 0.0))
-    except (TypeError, ValueError):
-        lh, la = 0.0, 0.0
-    poisson_ready = (lh + la) > 1e-6
-    if prediction.get("disp_poisson_xg_total") in (None, "", "—"):
-        if lh or la:
-            prediction["disp_poisson_xg_total"] = f"{lh + la:.2f}"
-    if prediction.get("disp_poisson_o25") in (None, "", "—"):
-        if not poisson_ready:
-            pass
-        else:
-            try:
-                v = float(prediction.get("poisson_over_25", float("nan")))
-                if math.isfinite(v):
-                    prediction["disp_poisson_o25"] = f"{v * 100:.1f}%"
-            except (TypeError, ValueError):
-                pass
-    if prediction.get("disp_poisson_btts") in (None, "", "—"):
-        if not poisson_ready:
-            pass
-        else:
-            try:
-                v = float(prediction.get("poisson_btts", float("nan")))
-                if math.isfinite(v):
-                    prediction["disp_poisson_btts"] = f"{v * 100:.1f}%"
-            except (TypeError, ValueError):
-                pass
-    # O1.5 / O3.5 / O4.5 (older caches may have the raw value but not the display)
-    for line, disp in ((1.5, "disp_poisson_o15"), (3.5, "disp_poisson_o35"), (4.5, "disp_poisson_o45")):
-        if prediction.get(disp) in (None, "", "—"):
-            try:
-                v = float(prediction.get(f"poisson_over_{str(line).replace('.', '')}", float("nan")))
-                if math.isfinite(v):
-                    prediction[disp] = f"{v * 100:.1f}%"
-            except (TypeError, ValueError):
-                pass
-    # HT markets (older caches may lack display fields but have raw ones)
-    if prediction.get("disp_ht_prob_home") in (None, "", "—"):
+_MISSING = (None, "", "—")
+
+# (raw key, display key, format spec) — one source of truth for deriving the
+# display strings that older caches may lack.
+_FT_DISPLAY_SPECS: list[tuple[str, str, str]] = [
+    ("lambda_home", "disp_lambda_home", ".2f"),
+    ("lambda_away", "disp_lambda_away", ".2f"),
+    ("poisson_prob_home", "disp_poisson_prob_home", ".1%"),
+    ("poisson_prob_draw", "disp_poisson_prob_draw", ".1%"),
+    ("poisson_prob_away", "disp_poisson_prob_away", ".1%"),
+    ("poisson_over_15", "disp_poisson_o15", ".1%"),
+    ("poisson_over_25", "disp_poisson_o25", ".1%"),
+    ("poisson_over_35", "disp_poisson_o35", ".1%"),
+    ("poisson_over_45", "disp_poisson_o45", ".1%"),
+    ("poisson_btts", "disp_poisson_btts", ".1%"),
+]
+_HT_DISPLAY_SPECS: list[tuple[str, str, str]] = [
+    ("lambda_ht_home", "disp_lambda_ht_home", ".2f"),
+    ("lambda_ht_away", "disp_lambda_ht_away", ".2f"),
+    ("ht_prob_home", "disp_ht_prob_home", ".1%"),
+    ("ht_prob_draw", "disp_ht_prob_draw", ".1%"),
+    ("ht_prob_away", "disp_ht_prob_away", ".1%"),
+    ("ht_over_05", "disp_ht_o05", ".1%"),
+    ("ht_over_15", "disp_ht_o15", ".1%"),
+    ("ht_over_25", "disp_ht_o25", ".1%"),
+]
+_CORNER_LINES = (8.5, 9.5, 10.5, 11.5, 12.5)
+_CORNER_DISPLAY_SPECS: list[tuple[str, str, str]] = [
+    ("corner_total", "disp_corner_total", ".1f"),
+    *[
+        (f"corner_over_{str(line).replace('.', '')}",
+         f"disp_corner_over_{str(line).replace('.', '')}", ".1%")
+        for line in _CORNER_LINES
+    ],
+]
+
+_POISSON_RAW_DEFAULTS: dict[str, Any] = {
+    "lambda_home": 0.0,
+    "lambda_away": 0.0,
+    "poisson_prob_home": 0.0,
+    "poisson_prob_draw": 0.0,
+    "poisson_prob_away": 0.0,
+    "poisson_over_25": 0.0,
+    "poisson_btts": 0.0,
+    "poisson_correct_scores": [],
+}
+_POISSON_DISPLAY_DEFAULTS: dict[str, str] = {
+    "disp_poisson_xg_total": "—",
+    "disp_poisson_vs_ensemble": "—",
+    "disp_poisson_correct_scores": "—",
+    **{disp: "—" for _, disp, _ in _FT_DISPLAY_SPECS},
+    **{disp: "—" for _, disp, _ in _HT_DISPLAY_SPECS},
+    **{disp: "—" for _, disp, _ in _CORNER_DISPLAY_SPECS},
+}
+
+
+def _derive_display_strings(prediction: dict[str, Any]) -> None:
+    """Backfill market display strings from raw values (older caches)."""
+    def _num(key: str) -> float | None:
+        value = prediction.get(key)
+        if value is None:
+            return None
         try:
-            h, d, a = float(prediction["ht_prob_home"]), float(prediction["ht_prob_draw"]), float(prediction["ht_prob_away"])
-            prediction["disp_ht_prob_home"] = f"{h * 100:.1f}%"
-            prediction["disp_ht_prob_draw"] = f"{d * 100:.1f}%"
-            prediction["disp_ht_prob_away"] = f"{a * 100:.1f}%"
-            if "lambda_ht_home" in prediction:
-                prediction["disp_lambda_ht_home"] = f"{float(prediction['lambda_ht_home']):.2f}"
-                prediction["disp_lambda_ht_away"] = f"{float(prediction['lambda_ht_away']):.2f}"
-            for line, disp in ((0.5, "disp_ht_o05"), (1.5, "disp_ht_o15"), (2.5, "disp_ht_o25")):
-                if prediction.get(disp) in (None, "", "—"):
-                    v = float(prediction.get(f"ht_over_{str(line).replace('.', '')}", float("nan")))
-                    if math.isfinite(v):
-                        prediction[disp] = f"{v * 100:.1f}%"
-        except (TypeError, ValueError, KeyError):
-            pass
-    # Corner markets
-    if prediction.get("disp_corner_total") in (None, "", "—") and "corner_total" in prediction:
-        try:
-            prediction["disp_corner_total"] = f"{float(prediction['corner_total']):.1f}"
+            f = float(value)
         except (TypeError, ValueError):
-            pass
-    for line in (8.5, 9.5, 10.5, 11.5, 12.5):
-        key = f"corner_over_{str(line).replace('.', '')}"
-        disp = f"disp_{key}"
-        if prediction.get(disp) in (None, "", "—"):
-            try:
-                v = float(prediction.get(key, float("nan")))
-                if math.isfinite(v):
-                    prediction[disp] = f"{v * 100:.1f}%"
-            except (TypeError, ValueError):
-                pass
-    if prediction.get("disp_poisson_vs_ensemble") in (None, "", "—"):
+            return None
+        return f if math.isfinite(f) else None
+
+    lh = _num("lambda_home")
+    la = _num("lambda_away")
+    poisson_ready = (lh or 0.0) + (la or 0.0) > 1e-6
+
+    if prediction.get("disp_poisson_xg_total") in _MISSING and ((lh or 0.0) + (la or 0.0)) > 0:
+        prediction["disp_poisson_xg_total"] = f"{(lh or 0.0) + (la or 0.0):.2f}"
+
+    for raw_key, disp_key, fmt in _FT_DISPLAY_SPECS:
+        if prediction.get(disp_key) not in _MISSING:
+            continue
+        if raw_key == "lambda_home":
+            value = lh
+            if value is None or value <= 0:
+                continue
+        elif raw_key == "lambda_away":
+            value = la
+            if value is None or value <= 0:
+                continue
+        else:
+            value = _num(raw_key)
+            if not poisson_ready:
+                continue
+        if value is not None:
+            prediction[disp_key] = format(value, fmt)
+
+    for specs, gate in ((_HT_DISPLAY_SPECS, "ht_prob_home"), (_CORNER_DISPLAY_SPECS, "corner_total")):
+        if gate not in prediction:
+            continue
+        for raw_key, disp_key, fmt in specs:
+            value = _num(raw_key)
+            if value is not None and prediction.get(disp_key) in _MISSING:
+                prediction[disp_key] = format(value, fmt)
+
+    if prediction.get("disp_poisson_vs_ensemble") in _MISSING and poisson_ready:
         try:
             e_h = float(prediction["prob_home"])
             e_d = float(prediction["prob_draw"])
@@ -313,21 +240,22 @@ def _backfill_poisson_display_fields(prediction: dict[str, Any]) -> None:
             p_a = float(prediction["poisson_prob_away"])
         except (TypeError, ValueError, KeyError):
             return
-        if not poisson_ready or (p_h + p_d + p_a) < 0.5:
+        if (p_h + p_d + p_a) < 0.5:
             return
-        d_h = (p_h - e_h) * 100.0
-        d_d = (p_d - e_d) * 100.0
-        d_a = (p_a - e_a) * 100.0
         prediction["disp_poisson_vs_ensemble"] = (
-            f"Poisson−ens. (pp): H {d_h:+.0f} · D {d_d:+.0f} · A {d_a:+.0f}"
+            f"Poisson−ens. (pp): H {(p_h - e_h) * 100:+.0f} · "
+            f"D {(p_d - e_d) * 100:+.0f} · A {(p_a - e_a) * 100:+.0f}"
         )
 
 
 class State(rx.State):
     current_tab: str = "home"
 
+    def set_current_tab(self, tab: str):
+        self.current_tab = tab
+
     # Matchweek
-    fixtures: list[dict[str, Any]] = FALLBACK_FIXTURES
+    fixtures: list[dict[str, Any]] = []
     predictions: list[dict[str, Any]] = []
     gameweek_label: str = "GW32"
     prediction_source: str = ""      # "cache" | "live"
@@ -357,50 +285,9 @@ class State(rx.State):
     history: list[dict[str, Any]] = []
     history_selected: int = -1
 
-    # Virtual bankroll
-    bankroll_summary: dict[str, Any] = {
-        "starting_bankroll": 1000.0,
-        "starting_bankroll_disp": "$1000.00",
-        "current_bankroll": 1000.0,
-        "current_bankroll_disp": "$1000.00",
-        "risk_cap": 0.05,
-        "risk_cap_disp": "5.0%",
-        "total_pnl": 0.0,
-        "total_pnl_disp": "+$0.00",
-        "pnl_positive": True,
-        "roi_disp": "+0.0%",
-        "record": "0-0",
-        "settled_count": 0,
-        "pending_count": 0,
-        "model_current_bankroll": 1000.0,
-        "model_current_bankroll_disp": "$1000.00",
-        "model_total_pnl": 0.0,
-        "model_total_pnl_disp": "+$0.00",
-        "model_pnl_positive": True,
-        "model_roi_disp": "+0.0%",
-        "model_settled": 0,
-        "model_record": "0-0",
-        "edge_current_bankroll": 1000.0,
-        "edge_current_bankroll_disp": "$1000.00",
-        "edge_total_pnl": 0.0,
-        "edge_total_pnl_disp": "+$0.00",
-        "edge_pnl_positive": True,
-        "edge_roi_disp": "+0.0%",
-        "edge_settled": 0,
-        "edge_record": "0-0",
-        "elo_current_bankroll": 1000.0,
-        "elo_current_bankroll_disp": "$1000.00",
-        "elo_total_pnl": 0.0,
-        "elo_total_pnl_disp": "+$0.00",
-        "elo_pnl_positive": True,
-        "elo_roi_disp": "+0.0%",
-        "elo_settled": 0,
-        "elo_record": "0-0",
-    }
-    bankroll_ledger: list[dict[str, Any]] = []
-    bankroll_model_ledger: list[dict[str, Any]] = []
-    bankroll_edge_ledger: list[dict[str, Any]] = []
-    bankroll_elo_ledger: list[dict[str, Any]] = []
+    # Virtual bankroll (strategy registry lives in bankroll.WALLETS)
+    bankroll_summary: dict[str, Any] = default_bankroll_summary()
+    bankroll_ledgers: dict[str, list[dict[str, Any]]] = {}
     bankroll_pnl_history: list[dict[str, Any]] = []
     bankroll_selected_wallet: str = ""
     bankroll_suggestions: list[dict[str, Any]] = []
@@ -484,10 +371,6 @@ class State(rx.State):
 
     # ── Fixtures ──────────────────────────────────────────────────────────────
 
-    def _reindex(self):
-        for i, f in enumerate(self.fixtures):
-            f["idx"] = i
-
     def load_fixtures_from_csv(self):
         # Use an absolute path so running from a different CWD
         # (e.g. during export/dev server) still reads the intended file.
@@ -498,7 +381,9 @@ class State(rx.State):
                 df = df.copy()
                 df["date"] = pd.to_datetime(df["date"], dayfirst=True, errors="coerce").dt.normalize()
                 df = df.dropna(subset=["date", "home_team", "away_team"])
-                today = _local_today_hk()
+                # Fixture dates are UK calendar dates → compare against UK date,
+                # not Hong Kong date (see _fixture_today_uk).
+                today = _fixture_today_uk()
 
                 # Accept either "gameweek" or "matchweek" as the GW column name
                 gw_col = next((c for c in ["gameweek", "matchweek"] if c in df.columns and df[c].notna().any()), None)
@@ -508,11 +393,17 @@ class State(rx.State):
                     # - If any matches in a GW are still today/future, that GW is active
                     # - This keeps mid-gameweek refreshes showing the full GW (including
                     #   already-played Saturday games alongside upcoming Sunday ones)
+                    # - After the season ends, fall back to the last known GW instead
+                    #   of showing placeholder fixtures.
                     future = df[df["date"] >= today].sort_values("date")
                     if future.empty:
-                        self.fixtures = FALLBACK_FIXTURES
-                        return
-                    current_gw = future.iloc[0][gw_col]
+                        gw_series = pd.to_numeric(df[gw_col], errors="coerce").dropna()
+                        if gw_series.empty:
+                            self.fixtures = []
+                            return
+                        current_gw = int(gw_series.max())
+                    else:
+                        current_gw = future.iloc[0][gw_col]
                     # Pull ALL fixtures for that GW from the full df, not just future ones
                     selected = df[df[gw_col] == current_gw].sort_values("date")
                     self.gameweek_label = f"GW{int(current_gw)}" if str(current_gw).isdigit() else f"{current_gw}"
@@ -520,12 +411,14 @@ class State(rx.State):
                     # No GW column — fall back to a 4-day window around the next fixture
                     future = df[df["date"] >= today].sort_values("date")
                     if future.empty:
-                        self.fixtures = FALLBACK_FIXTURES
-                        return
-                    start = future["date"].min()
-                    end = start + pd.Timedelta(days=3)
-                    selected = df[(df["date"] >= start) & (df["date"] <= end)]
-                    self.gameweek_label = f"Next ({start.strftime('%b %d')})"
+                        last_day = df["date"].max()
+                        selected = df[df["date"] == last_day]
+                        self.gameweek_label = f"Last ({last_day.strftime('%b %d')})"
+                    else:
+                        start = future["date"].min()
+                        end = start + pd.Timedelta(days=3)
+                        selected = df[(df["date"] >= start) & (df["date"] <= end)]
+                        self.gameweek_label = f"Next ({start.strftime('%b %d')})"
                 rows: list[dict[str, Any]] = []
                 has_b365_cols = all(c in selected.columns for c in ["B365H", "B365D", "B365A"])
                 for i, row in enumerate(selected.itertuples(index=False), start=0):
@@ -540,28 +433,12 @@ class State(rx.State):
                         fixture_row["B365D"] = getattr(row, "B365D")
                         fixture_row["B365A"] = getattr(row, "B365A")
                     rows.append(fixture_row)
-                if rows:
-                    self.fixtures = rows
+                self.fixtures = rows
             except Exception:
-                self.fixtures = FALLBACK_FIXTURES
+                logger.exception("Failed to load fixtures.csv; showing an empty fixture list")
+                self.fixtures = []
         else:
-            self.fixtures = FALLBACK_FIXTURES
-
-    def add_fixture(self):
-        self.fixtures.append({"idx": len(self.fixtures), "date": "", "home_team": "", "away_team": ""})
-
-    def delete_fixture(self, idx: int):
-        self.fixtures = [f for f in self.fixtures if f["idx"] != idx]
-        self._reindex()
-
-    def update_date(self, idx: int, value: str):
-        self.fixtures[idx]["date"] = value
-
-    def update_home_fixture(self, idx: int, value: str):
-        self.fixtures[idx]["home_team"] = value
-
-    def update_away_fixture(self, idx: int, value: str):
-        self.fixtures[idx]["away_team"] = value
+            self.fixtures = []
 
     # ── ML pipeline ──────────────────────────────────────────────────────────
 
@@ -570,118 +447,35 @@ class State(rx.State):
         from features import load_model_and_elo
         model_path = os.path.join(APP_DIR, "xgboost_premier_league_model.pkl")
         elo_path = os.path.join(APP_DIR, "premier_league_with_elo_best.csv")
-        model, df_elo = load_model_and_elo(model_path, elo_path)
+        model, df_elo = _load_artifact(
+            lambda: load_model_and_elo(model_path, elo_path), model_path, elo_path,
+        )
         return model, df_elo, elo_lookup_key
 
     def _with_poisson_layer(self, upcoming: pd.DataFrame, df_elo: pd.DataFrame) -> pd.DataFrame:
         """Attach λ + Poisson markets (FT/HT/corners) using the trained models."""
         try:
-            from run_pipeline import add_poisson_outputs, add_ht_outputs, add_corner_outputs
+            def _pickle(path: str):
+                return _load_artifact(lambda: joblib.load(path), path)
 
             gh_path = os.path.join(APP_DIR, "goal_model_home.pkl")
             ga_path = os.path.join(APP_DIR, "goal_model_away.pkl")
             if os.path.isfile(gh_path) and os.path.isfile(ga_path):
-                upcoming = add_poisson_outputs(upcoming, joblib.load(gh_path), joblib.load(ga_path), df_elo)
+                upcoming = add_poisson_outputs(upcoming, _pickle(gh_path), _pickle(ga_path), df_elo)
 
             ht_h = os.path.join(APP_DIR, "goal_model_ht_home.pkl")
             ht_a = os.path.join(APP_DIR, "goal_model_ht_away.pkl")
             if os.path.isfile(ht_h) and os.path.isfile(ht_a):
-                upcoming = add_ht_outputs(upcoming, joblib.load(ht_h), joblib.load(ht_a), df_elo)
+                upcoming = add_ht_outputs(upcoming, _pickle(ht_h), _pickle(ht_a), df_elo)
 
             ch = os.path.join(APP_DIR, "corner_model_home.pkl")
             ca = os.path.join(APP_DIR, "corner_model_away.pkl")
             if os.path.isfile(ch) and os.path.isfile(ca):
-                upcoming = add_corner_outputs(upcoming, joblib.load(ch), joblib.load(ca), df_elo)
+                upcoming = add_corner_outputs(upcoming, _pickle(ch), _pickle(ca), df_elo)
             return upcoming
         except Exception:
+            logger.exception("Poisson market layer failed; serving ensemble probabilities only")
             return upcoming
-
-    def _predict_upcoming(self, upcoming: pd.DataFrame, df_elo: pd.DataFrame, model) -> pd.DataFrame:
-        from features import detect_model_features, ensure_model_features
-        feature_cols = detect_model_features(model)
-        if not feature_cols:
-            raise ValueError("Cannot determine expected features from loaded model.")
-        upcoming = ensure_model_features(upcoming, df_elo, feature_cols)
-        probs = model.predict_proba(upcoming[feature_cols])
-
-        # Model classes are encoded as 0=Away, 1=Draw, 2=Home.
-        upcoming["prob_away"]      = probs[:, 0]
-        upcoming["prob_draw"]      = probs[:, 1]
-        upcoming["prob_home"]      = probs[:, 2]
-        upcoming["fair_odds_home"] = 1 / upcoming["prob_home"]
-        upcoming["fair_odds_draw"] = 1 / upcoming["prob_draw"]
-        upcoming["fair_odds_away"] = 1 / upcoming["prob_away"]
-
-        upcoming["disp_odds_home"] = upcoming["fair_odds_home"].map(format_odds_display)
-        upcoming["disp_odds_draw"] = upcoming["fair_odds_draw"].map(format_odds_display)
-        upcoming["disp_odds_away"] = upcoming["fair_odds_away"].map(format_odds_display)
-        upcoming["disp_prob_home"] = upcoming["prob_home"].map(lambda v: f"{v*100:.1f}%")
-        upcoming["disp_prob_draw"] = upcoming["prob_draw"].map(lambda v: f"{v*100:.1f}%")
-        upcoming["disp_prob_away"] = upcoming["prob_away"].map(lambda v: f"{v*100:.1f}%")
-        upcoming["disp_elo_diff"]  = upcoming["elo_diff"].map(lambda v: f"{v:+.0f}")
-        upcoming["badge_home"]     = upcoming["home_team"].map(
-            lambda t: TEAM_BADGES.get(badge_lookup_key(str(t)), FALLBACK_BADGE)
-        )
-        upcoming["badge_away"]     = upcoming["away_team"].map(
-            lambda t: TEAM_BADGES.get(badge_lookup_key(str(t)), FALLBACK_BADGE)
-        )
-        upcoming["chart_label"]    = upcoming.apply(
-            lambda r: r["home_team"][:3].upper() + " v " + r["away_team"][:3].upper(), axis=1)
-
-        # Model's predicted outcome per match
-        upcoming["model_pick"] = upcoming.apply(
-            lambda r: max(
-                [("H", r["prob_home"]), ("D", r["prob_draw"]), ("A", r["prob_away"])],
-                key=lambda x: x[1]
-            )[0], axis=1
-        )
-
-        has_book_cols = all(c in upcoming.columns for c in ("B365H", "B365D", "B365A"))
-        if has_book_cols:
-            book_h = pd.to_numeric(upcoming["B365H"], errors="coerce")
-            book_d = pd.to_numeric(upcoming["B365D"], errors="coerce")
-            book_a = pd.to_numeric(upcoming["B365A"], errors="coerce")
-            valid = (book_h > 0) & (book_d > 0) & (book_a > 0)
-
-            upcoming["book_odds_home"] = book_h.where(valid, np.nan)
-            upcoming["book_odds_draw"] = book_d.where(valid, np.nan)
-            upcoming["book_odds_away"] = book_a.where(valid, np.nan)
-
-            inv_h = (1.0 / book_h).where(valid, np.nan)
-            inv_d = (1.0 / book_d).where(valid, np.nan)
-            inv_a = (1.0 / book_a).where(valid, np.nan)
-            total = (inv_h + inv_d + inv_a).where(valid, np.nan)
-
-            upcoming["book_prob_home"] = (inv_h / total).where(valid, np.nan)
-            upcoming["book_prob_draw"] = (inv_d / total).where(valid, np.nan)
-            upcoming["book_prob_away"] = (inv_a / total).where(valid, np.nan)
-        else:
-            upcoming["book_odds_home"] = np.nan
-            upcoming["book_odds_draw"] = np.nan
-            upcoming["book_odds_away"] = np.nan
-            upcoming["book_prob_home"] = np.nan
-            upcoming["book_prob_draw"] = np.nan
-            upcoming["book_prob_away"] = np.nan
-
-        upcoming["disp_book_odds_home"] = upcoming["book_odds_home"].map(
-            lambda v: format_odds_display(v) if pd.notna(v) else ""
-        )
-        upcoming["disp_book_odds_draw"] = upcoming["book_odds_draw"].map(
-            lambda v: format_odds_display(v) if pd.notna(v) else ""
-        )
-        upcoming["disp_book_odds_away"] = upcoming["book_odds_away"].map(
-            lambda v: format_odds_display(v) if pd.notna(v) else ""
-        )
-        upcoming["disp_book_prob_home"] = upcoming["book_prob_home"].map(
-            lambda v: f"{v*100:.1f}%" if pd.notna(v) else ""
-        )
-        upcoming["disp_book_prob_draw"] = upcoming["book_prob_draw"].map(
-            lambda v: f"{v*100:.1f}%" if pd.notna(v) else ""
-        )
-        upcoming["disp_book_prob_away"] = upcoming["book_prob_away"].map(
-            lambda v: f"{v*100:.1f}%" if pd.notna(v) else ""
-        )
-        return upcoming
 
     def _compute_insights(self, df: pd.DataFrame):
         records = df.to_dict("records")
@@ -808,17 +602,34 @@ class State(rx.State):
         )
 
     def _load_predictions_cache_dict(self) -> tuple[dict[str, Any] | None, str]:
-        """Read cache JSON from env, remote_data_urls.json, or predictions_cache.json."""
+        """Read cache JSON from env, remote_data_urls.json, or predictions_cache.json.
+
+        Remote-first by default (deployed apps). When ``AUGO_LOCAL_DATA=1`` is
+        set, the freshly written local cache wins so local development never
+        falls back to a stale published snapshot.
+        """
         url = predictions_cache_url()
+        local_exists = os.path.exists(CACHE_FILE)
+        prefer_remote = bool(url) and remote_first()
+
+        if not prefer_remote and local_exists:
+            try:
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f), ""
+            except Exception:
+                if not url:
+                    return None, "cache unreadable"
+
         if url:
             try:
                 r = requests.get(url, timeout=20)
                 r.raise_for_status()
                 return json.loads(r.text), ""
             except Exception as e:
-                if not os.path.exists(CACHE_FILE):
+                if not local_exists:
                     return None, f"remote cache failed ({e}); no local file"
-        if not os.path.exists(CACHE_FILE):
+
+        if not local_exists:
             return None, "cache file missing"
         try:
             with open(CACHE_FILE, "r", encoding="utf-8") as f:
@@ -867,28 +678,23 @@ class State(rx.State):
 
     def _archive_current_cache_if_missing(self, cache: dict[str, Any]):
         """Write predictions_history/GW{N}.json if it doesn't yet exist."""
-        gw = _gw_int_from_label(self.gameweek_label)
-        if gw is None:
+        result = archive_predictions(cache, self.gameweek_label)
+        if result is None:
             return
-        history_dir = os.path.join(APP_DIR, "predictions_history")
-        archive_path = os.path.join(history_dir, f"GW{gw}.json")
-        if os.path.exists(archive_path):
-            return
-        try:
-            os.makedirs(history_dir, exist_ok=True)
-            with open(archive_path, "w", encoding="utf-8") as f:
-                json.dump(cache, f, indent=2)
-        except Exception:
-            pass
+        path, created = result
+        if created:
+            logger.info("Archived cache snapshot -> %s", path)
 
     def _load_predictions_live(self):
+        if not self.fixtures:
+            self.predictions = []
+            return
         model, df_elo, _elo_key = self._load_model_and_elo()
         raw = [{k: v for k, v in f.items() if k != "idx"} for f in self.fixtures]
         upcoming = pd.DataFrame(raw)
         upcoming["date"] = pd.to_datetime(upcoming["date"])
-        from features import compute_current_elo
         upcoming = compute_current_elo(upcoming, df_elo, _elo_key)
-        upcoming = self._predict_upcoming(upcoming, df_elo, model)
+        upcoming = predict_matches(upcoming, model, df_elo)
         upcoming = self._with_poisson_layer(upcoming, df_elo)
         self.predictions = upcoming.to_dict("records")
         for i in range(len(self.predictions)):
@@ -899,39 +705,11 @@ class State(rx.State):
 
     @staticmethod
     def _ensure_poisson_defaults(prediction: dict[str, Any]) -> None:
-        prediction.setdefault("lambda_home", 0.0)
-        prediction.setdefault("lambda_away", 0.0)
-        prediction.setdefault("disp_lambda_home", "—")
-        prediction.setdefault("disp_lambda_away", "—")
-        prediction.setdefault("poisson_prob_home", 0.0)
-        prediction.setdefault("poisson_prob_draw", 0.0)
-        prediction.setdefault("poisson_prob_away", 0.0)
-        prediction.setdefault("disp_poisson_prob_home", "—")
-        prediction.setdefault("disp_poisson_prob_draw", "—")
-        prediction.setdefault("disp_poisson_prob_away", "—")
-        prediction.setdefault("poisson_over_25", 0.0)
-        prediction.setdefault("poisson_btts", 0.0)
-        prediction.setdefault("disp_poisson_xg_total", "—")
-        prediction.setdefault("disp_poisson_o15", "—")
-        prediction.setdefault("disp_poisson_o25", "—")
-        prediction.setdefault("disp_poisson_o35", "—")
-        prediction.setdefault("disp_poisson_o45", "—")
-        prediction.setdefault("disp_poisson_btts", "—")
-        prediction.setdefault("disp_poisson_vs_ensemble", "—")
-        prediction.setdefault("poisson_correct_scores", [])
-        prediction.setdefault("disp_poisson_correct_scores", "—")
-        prediction.setdefault("disp_lambda_ht_home", "—")
-        prediction.setdefault("disp_lambda_ht_away", "—")
-        prediction.setdefault("disp_ht_prob_home", "—")
-        prediction.setdefault("disp_ht_prob_draw", "—")
-        prediction.setdefault("disp_ht_prob_away", "—")
-        prediction.setdefault("disp_ht_o05", "—")
-        prediction.setdefault("disp_ht_o15", "—")
-        prediction.setdefault("disp_ht_o25", "—")
-        prediction.setdefault("disp_corner_total", "—")
-        for line in (8.5, 9.5, 10.5, 11.5, 12.5):
-            prediction.setdefault(f"disp_corner_over_{str(line).replace('.', '')}", "—")
-        _backfill_poisson_display_fields(prediction)
+        for key, default in _POISSON_RAW_DEFAULTS.items():
+            prediction.setdefault(key, default)
+        for key, default in _POISSON_DISPLAY_DEFAULTS.items():
+            prediction.setdefault(key, default)
+        _derive_display_strings(prediction)
         prediction["explanation"] = build_explanation(prediction)
         prediction.setdefault("explanation_summary", prediction["explanation"].get("driver_summary", ""))
 
@@ -959,18 +737,11 @@ class State(rx.State):
         try:
             save_bankroll(settings)
         except Exception:
-            pass
+            logger.exception("Could not persist bankroll settings")
 
-        excluded = ("ledger", "latest_ledger", "suggestions",
-                    "model_ledger", "latest_model_ledger",
-                    "edge_ledger", "latest_edge_ledger",
-                    "elo_ledger", "latest_elo_ledger",
-                    "pnl_history")
+        excluded = ("ledger", "ledgers", "suggestions", "pnl_history")
         self.bankroll_summary = {k: v for k, v in summary.items() if k not in excluded}
-        self.bankroll_ledger = summary["latest_ledger"]
-        self.bankroll_model_ledger = summary["latest_model_ledger"]
-        self.bankroll_edge_ledger = summary["latest_edge_ledger"]
-        self.bankroll_elo_ledger = summary["latest_elo_ledger"]
+        self.bankroll_ledgers = summary["ledgers"]
         self.bankroll_pnl_history = summary["pnl_history"]
         self.bankroll_suggestions = build_current_suggestions(
             self.predictions,
@@ -988,44 +759,34 @@ class State(rx.State):
 
     @rx.var
     def selected_wallet_entry(self) -> dict[str, Any]:
-        for w in WALLET_DEFS:
+        for w in WALLETS:
             if w["id"] == self.bankroll_selected_wallet:
                 return w
         return {}
 
     @rx.var
+    def selected_wallet_style(self) -> str:
+        for w in WALLETS:
+            if w["id"] == self.bankroll_selected_wallet:
+                return w["ledger_style"]
+        return "flat"
+
+    @rx.var
     def selected_wallet_ledger(self) -> list[dict[str, Any]]:
-        if self.bankroll_selected_wallet == "model":
-            return self.bankroll_model_ledger
-        if self.bankroll_selected_wallet == "value":
-            return self.bankroll_ledger
-        if self.bankroll_selected_wallet == "edge":
-            return self.bankroll_edge_ledger
-        if self.bankroll_selected_wallet == "elo":
-            return self.bankroll_elo_ledger
-        return []
+        return self.bankroll_ledgers.get(self.bankroll_selected_wallet, [])
 
     @rx.var
     def selected_wallet_summary(self) -> dict[str, Any]:
-        prefix = {
-            "model": "model", "value": "", "edge": "edge", "elo": "elo",
-        }.get(self.bankroll_selected_wallet, "")
-        if prefix:
-            return {
-                "balance": self.bankroll_summary[f"{prefix}_current_bankroll_disp"],
-                "pnl": self.bankroll_summary[f"{prefix}_total_pnl_disp"],
-                "positive": self.bankroll_summary[f"{prefix}_pnl_positive"],
-                "roi": self.bankroll_summary[f"{prefix}_roi_disp"],
-                "settled": self.bankroll_summary[f"{prefix}_settled"],
-                "record": self.bankroll_summary[f"{prefix}_record"],
-            }
+        wid = self.bankroll_selected_wallet
+        if not wid:
+            return {}
         return {
-            "balance": self.bankroll_summary["current_bankroll_disp"],
-            "pnl": self.bankroll_summary["total_pnl_disp"],
-            "positive": self.bankroll_summary["pnl_positive"],
-            "roi": self.bankroll_summary["roi_disp"],
-            "settled": self.bankroll_summary["settled_count"],
-            "record": self.bankroll_summary["record"],
+            "balance": self.bankroll_summary[f"{wid}_current_bankroll_disp"],
+            "pnl": self.bankroll_summary[f"{wid}_total_pnl_disp"],
+            "positive": self.bankroll_summary[f"{wid}_pnl_positive"],
+            "roi": self.bankroll_summary[f"{wid}_roi_disp"],
+            "settled": self.bankroll_summary[f"{wid}_settled"],
+            "record": self.bankroll_summary[f"{wid}_record"],
         }
 
     def update_bankroll_starting(self, value: str):
@@ -1054,15 +815,28 @@ class State(rx.State):
         self.prediction_source = ""
         self.prediction_source_note = ""
 
+        if not self.fixtures:
+            self.predictions = []
+            self.user_picks = []
+            try:
+                self._rebuild_history()
+            except Exception:
+                logger.exception("History rebuild failed while fixtures were empty")
+            try:
+                self._rebuild_bankroll()
+            except Exception:
+                logger.exception("Bankroll rebuild failed while fixtures were empty")
+            return rx.toast.warning("No fixtures found — check fixtures.csv.")
+
         cache_ok, cache_reason = self._try_load_predictions_cache()
         try:
             self._rebuild_history()
         except Exception:
-            pass
+            logger.exception("History rebuild failed")
         try:
             self._rebuild_bankroll()
         except Exception:
-            pass
+            logger.exception("Bankroll rebuild failed")
 
         if cache_ok:
             return rx.toast.success("Loaded cached predictions.")
@@ -1085,17 +859,17 @@ class State(rx.State):
         try:
             model, df_elo, _elo_key = self._load_model_and_elo()
             df = pd.DataFrame([{
-                "date": str(_local_today_hk().date()),
+                "date": str(_fixture_today_uk().date()),
                 "home_team": self.custom_home,
                 "away_team": self.custom_away,
             }])
             df["date"] = pd.to_datetime(df["date"])
-            from features import compute_current_elo
             df = compute_current_elo(df, df_elo, _elo_key)
-            df = self._predict_upcoming(df, df_elo, model)
+            df = predict_matches(df, model, df_elo)
             df = self._with_poisson_layer(df, df_elo)
             self.custom_result = df.to_dict("records")
         except Exception as e:
+            logger.exception("Custom prediction failed")
             return rx.toast.error(f"Prediction error: {e}")
 
     # ── User picks ────────────────────────────────────────────────────────────
@@ -1144,10 +918,6 @@ class State(rx.State):
 
     def back_to_history_list(self):
         self.history_selected = -1
-
-    def set_actual_result(self, gw_idx: int, match_idx: int, result: str):
-        """Deprecated: actual results now come from results.csv automatically."""
-        return None
 
     def _rebuild_history(self):
         """Rebuild self.history from disk (archives + results.csv + user_picks.json)."""
@@ -1275,10 +1045,7 @@ class State(rx.State):
 
 
 def _gw_int_from_label(label: str) -> int | None:
-    if not label:
-        return None
-    m = re.search(r"\d+", str(label))
-    return int(m.group(0)) if m else None
+    return gw_from_label(label)
 
 
 # ── Shared UI helpers ─────────────────────────────────────────────────────────
@@ -2538,46 +2305,13 @@ def bankroll_model_row(bet: dict) -> rx.Component:
     )
 
 
-WALLET_DEFS: list[dict[str, str]] = [
-    {
-        "id": "model",
-        "name": "MODEL",
-        "color": "#6C63FF",
-        "method": "Stakes the risk-cap % of the wallet (max 5%) on the model's pick (H/D/A) at its own "
-                  "fair odds (1/prob) for every match. A pure test of whether the model beats its own probabilities.",
-    },
-    {
-        "id": "value",
-        "name": "VALUE KELLY",
-        "color": "#FFB74D",
-        "method": "Kelly-sized stakes (capped by risk cap) on the best positive edge per match — "
-                  "model probability above the bookmaker implied probability — placed at bookmaker odds.",
-    },
-    {
-        "id": "edge",
-        "name": "TOP-4 EDGES",
-        "color": "#9CCC65",
-        "method": "Each gameweek, ranks every match by model-vs-bookmaker probability edge and stakes the "
-                  "risk-cap % (Kelly, capped 5%) on the edge outcome of the 4 biggest edges, at bookmaker odds.",
-    },
-    {
-        "id": "elo",
-        "name": "TOP-4 ELO",
-        "color": "#81D4FA",
-        "method": "Each gameweek, ranks every match by |ELO difference| and stakes the risk-cap % (max 5%) on "
-                  "the ELO favourite (home if elo_diff > 0, away if < 0) of the 4 biggest gaps, at fair odds.",
-    },
-]
-
-
 def pnl_comparison_chart() -> rx.Component:
     """Cumulative PnL of all wallets per gameweek."""
     lines = [
-        rx.recharts.line(data_key="model_pnl", stroke="#6C63FF", stroke_width=2, type="monotone"),
-        rx.recharts.line(data_key="value_pnl", stroke="#FFB74D", stroke_width=2, type="monotone"),
-        rx.recharts.line(data_key="edge_pnl", stroke="#9CCC65", stroke_width=2, type="monotone"),
-        rx.recharts.line(data_key="elo_pnl", stroke="#81D4FA", stroke_width=2, type="monotone"),
+        rx.recharts.line(data_key=f"{w['id']}_pnl", stroke=w["color"], stroke_width=2, type="monotone")
+        for w in WALLETS
     ]
+    legend = "   ".join(f"■ {w['name']}" for w in WALLETS)
     return rx.box(
         rx.vstack(
             section_label("WALLET P/L OVER TIME  (cumulative per GW)"),
@@ -2592,8 +2326,7 @@ def pnl_comparison_chart() -> rx.Component:
                 width="100%",
                 height=240,
             ),
-            rx.text("■ Model (fair odds)   ■ Value Kelly (book odds)   ■ Top-4 edges   ■ Top-4 ELO",
-                    color="#666", font_size="0.62em"),
+            rx.text(legend, color="#666", font_size="0.6em", line_height="1.5"),
             spacing="2",
             width="100%",
         ),
@@ -2608,17 +2341,11 @@ def pnl_comparison_chart() -> rx.Component:
 def wallet_island(w: dict) -> rx.Component:
     """Clickable wallet summary card."""
     prefix = w["id"]
-    is_value = prefix == "value"
-    balance = (State.bankroll_summary["current_bankroll_disp"] if is_value
-               else State.bankroll_summary[f"{prefix}_current_bankroll_disp"])
-    pnl = (State.bankroll_summary["total_pnl_disp"] if is_value
-           else State.bankroll_summary[f"{prefix}_total_pnl_disp"])
-    positive = (State.bankroll_summary["pnl_positive"] if is_value
-                else State.bankroll_summary[f"{prefix}_pnl_positive"])
-    roi = (State.bankroll_summary["roi_disp"] if is_value
-           else State.bankroll_summary[f"{prefix}_roi_disp"])
-    record = (State.bankroll_summary["record"] if is_value
-              else State.bankroll_summary[f"{prefix}_record"])
+    balance = State.bankroll_summary[f"{prefix}_current_bankroll_disp"]
+    pnl = State.bankroll_summary[f"{prefix}_total_pnl_disp"]
+    positive = State.bankroll_summary[f"{prefix}_pnl_positive"]
+    roi = State.bankroll_summary[f"{prefix}_roi_disp"]
+    record = State.bankroll_summary[f"{prefix}_record"]
     return rx.box(
         rx.vstack(
             rx.hstack(
@@ -2636,7 +2363,8 @@ def wallet_island(w: dict) -> rx.Component:
             width="100%",
         ),
         on_click=State.select_wallet(w["id"]),
-        flex="1",
+        flex="1 1 108px",
+        min_width="108px",
         padding="12px 10px",
         background_color="#141414",
         border=f"1px solid {w['color']}33",
@@ -2649,7 +2377,7 @@ def bankroll_detail_view() -> rx.Component:
     """Full detail page for the selected wallet: method + ledger."""
     entry = State.selected_wallet_entry
     summary = State.selected_wallet_summary
-    is_value = State.bankroll_selected_wallet == "value"
+    is_edge_style = State.selected_wallet_style == "edge"
     ledger_var = State.selected_wallet_ledger
     return rx.vstack(
         rx.hstack(
@@ -2700,7 +2428,7 @@ def bankroll_detail_view() -> rx.Component:
             rx.text("No bets yet — they appear after the gameweek is archived and results are synced.",
                     color="#444", font_size="0.75em"),
             rx.cond(
-                is_value,
+                is_edge_style,
                 rx.vstack(rx.foreach(ledger_var.to(list[dict[str, Any]]), bankroll_bet_row),
                           width="100%", spacing="2"),
                 rx.vstack(rx.foreach(ledger_var.to(list[dict[str, Any]]), bankroll_model_row),
@@ -2717,10 +2445,11 @@ def bankroll_tab() -> rx.Component:
         State.bankroll_selected_wallet != "",
         bankroll_detail_view(),
         rx.vstack(
-            rx.hstack(
-                *[wallet_island(w) for w in WALLET_DEFS],
+            rx.flex(
+                *[wallet_island(w) for w in WALLETS],
                 width="100%",
                 spacing="2",
+                wrap="wrap",
             ),
             rx.hstack(
                 bankroll_stat("VALUE PENDING", State.bankroll_summary["pending_count"].to_string(), "#888"),

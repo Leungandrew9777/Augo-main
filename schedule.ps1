@@ -32,7 +32,9 @@ $actionArgs = @{
                "-File", "`"$proj\scheduled.ps1`"", "-Mode", "weekly")
 }
 
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
+# WakeToRun: bring the PC out of sleep to run the task. StartWhenAvailable: run
+# as soon as the machine is back if the scheduled time was missed (e.g. was off).
+$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
 
 if ($DryRun) {
     Write-Host "Would register:" -ForegroundColor Cyan

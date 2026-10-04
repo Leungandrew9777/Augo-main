@@ -34,10 +34,15 @@ WEEKLY (each matchday):
 | `feature_engineering.py` | Step 2: rolling stats, xG proxies, ELO, head-to-head -> `premier_league_with_elo_best.csv`. |
 | `train_ensemble.py` | Step 3: fit the soft-voting ensemble -> `xgboost_premier_league_model.pkl`. |
 | `run_pipeline.py` | Weekly: load model + ELO, score upcoming fixtures, fetch live odds, write predictions cache + history snapshot. |
+| `inference.py` | Shared serving path (ensemble probabilities + Poisson/HT/corner markets) used by both `run_pipeline.py` and `app.py`. |
 | `app.py` | Reflex UI (Predictor, Insights, Custom predictor, History). |
+| `league.py` | Premier League team list + badge URLs shared by the pipeline and UI. |
+| `metrics.py` | Shared Brier / expected-calibration-error metrics for training and evaluation. |
 | `team_aliases.py` | Maps team-name variants between fixtures, ELO history, results, and the odds API. |
+| `display.py` | Shared odds formatting so `run_pipeline.py` and `app.py` render identical display strings. |
+| `bankroll.py` | Virtual-wallet strategy registry (`WALLETS`), ledger builders and portfolio/PnL summaries. |
 | `persistence.py` | Disk-backed history layer: archived predictions, `results.csv`, `user_picks.json`. |
-| `rxconfig.py`, `Augo/` | Reflex plumbing. |
+| `rxconfig.py`, `.web/` | Reflex plumbing. |
 
 ### Data
 
@@ -66,6 +71,15 @@ ODDS_API_KEY=your_the_odds_api_key
 
 `ODDS_API_KEY` is optional; without it `run_pipeline.py` skips the live
 bookmaker-odds fetch and the cache will not include `book_*` fields.
+
+Optional:
+
+- `AUGO_LOCAL_DATA=1` — prefer local `results.csv` / `predictions_cache.json`
+  over the published remote URLs (the scheduler sets this automatically). By
+  default the deployed app is remote-first so it always reads the latest
+  `data_repo` push.
+- `CACHE_MAX_AGE_HOURS=168` — max cache age before the app falls back to live
+  inference (`0` disables the stale check).
 
 ## How history persistence works
 

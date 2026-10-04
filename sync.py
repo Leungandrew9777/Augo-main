@@ -15,8 +15,9 @@ Notes
   date clusters and assigned the next GW number(s) after the current max
   (use ``--gw N`` to start a new season at GW N).
 * Results: only matches whose (date/team) pairing is found in fixtures.csv are
-  written, so gameweeks are always correct; rows already present are updated
-  in place (e.g. goal corrections).
+  written, so gameweeks are always correct; rows already present (matched by
+  date first, then gameweek + pairing) are updated in place (e.g. goal
+  corrections) without cross-season collisions.
 * Override output paths with AUGO_FIXTURES_FILE / AUGO_RESULTS_FILE.
 """
 
@@ -24,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -237,17 +237,38 @@ def sync_results(days: int = 3) -> None:
             pair_gw.setdefault((str(r["home_team"]).strip(), str(r["away_team"]).strip()), []).append(int(r["gameweek"]))
 
     results = _load_results()
-    existing: dict[tuple[str, str], int] = {}
+
+    def _norm_date(value: object) -> str:
+        ts = pd.to_datetime(value, errors="coerce", dayfirst=True, format="mixed")
+        return str(ts.date()) if pd.notna(ts) else str(value).strip()
+
+    def _as_int(value: object) -> int | None:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    # Key existing rows by (date, home, away) first, then (gw, home, away), so a
+    # goal correction finds the right row and identical pairings in a later
+    # season never overwrite the previous season's result.
+    existing_by_date: dict[tuple[str, str, str], int] = {}
+    existing_by_gw: dict[tuple[int, str, str], list[int]] = {}
     for i, r in results.iterrows():
-        key = (fixture_lookup_key(str(r["home_team"])), fixture_lookup_key(str(r["away_team"])))
-        existing.setdefault(key, i)
+        rh, ra = fixture_lookup_key(str(r["home_team"])), fixture_lookup_key(str(r["away_team"]))
+        existing_by_date.setdefault((_norm_date(r["date"]), rh, ra), i)
+        try:
+            rgw = int(r["gameweek"])
+        except (TypeError, ValueError):
+            continue
+        existing_by_gw.setdefault((rgw, rh, ra), []).append(i)
 
     added = 0
     updated = 0
     skipped: list[str] = []
     for s in scores.to_dict("records"):
         h, a = str(s["home_team"]).strip(), str(s["away_team"]).strip()
-        gw = date_gw.get((str(s["date"]), h, a))
+        match_date = _norm_date(s["date"])
+        gw = date_gw.get((match_date, h, a))
         if gw is None:
             gws = pair_gw.get((h, a), [])
             gw = gws[0] if len(gws) == 1 else None
@@ -262,22 +283,43 @@ def sync_results(days: int = 3) -> None:
             "home_goals": int(s["home_goals"]),
             "away_goals": int(s["away_goals"]),
         }
-        key = (h, a)
-        if key in existing:
-            idx = existing[key]
+        key_date = (match_date, h, a)
+        key_gw = (gw, h, a)
+        idx = existing_by_date.get(key_date)
+        if idx is None:
+            # Same pairing + gameweek is only treated as the same match when a
+            # stored row's date is close by (date drift / postponement). Pick the
+            # closest candidate so duplicate pairings across seasons are safe.
+            played = pd.to_datetime(match_date, errors="coerce")
+            best_diff: int | None = None
+            for candidate in existing_by_gw.get(key_gw, []):
+                stored = pd.to_datetime(results.iloc[candidate]["date"], errors="coerce", dayfirst=True)
+                if pd.isna(stored) or pd.isna(played):
+                    continue
+                diff = abs((played - stored).days)
+                if diff <= 14 and (best_diff is None or diff < best_diff):
+                    best_diff, idx = diff, candidate
+        if idx is not None:
             old = results.iloc[idx]
-            if int(old["home_goals"]) != row["home_goals"] or int(old["away_goals"]) != row["away_goals"]:
-                results.iloc[idx] = pd.Series(row)
+            if (_as_int(old["home_goals"]) != row["home_goals"]
+                    or _as_int(old["away_goals"]) != row["away_goals"]):
+                for col, val in row.items():
+                    results.loc[idx, col] = val
+                existing_by_date[key_date] = idx
+                bucket = existing_by_gw.setdefault(key_gw, [])
+                if idx not in bucket:
+                    bucket.append(idx)
                 updated += 1
         else:
             results = pd.concat([results, pd.DataFrame([row])], ignore_index=True)
-            existing[key] = len(results) - 1
+            existing_by_date[key_date] = len(results) - 1
+            existing_by_gw.setdefault(key_gw, []).append(len(results) - 1)
             added += 1
 
     if skipped:
         print(f"   ⚠️  Skipped {len(skipped)} match(es) not in fixtures.csv: {', '.join(skipped[:5])}"
               + (" …" if len(skipped) > 5 else ""))
-    out = results.drop_duplicates(subset=["home_team", "away_team"])
+    out = results.drop_duplicates(subset=["date", "home_team", "away_team"])
     out = out.sort_values(["date", "gameweek"])
     out.to_csv(RESULTS_FILE, index=False)
     print(f"results: {added} added, {updated} updated -> {len(out)} total ({RESULTS_FILE})")

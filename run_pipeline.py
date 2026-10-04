@@ -5,20 +5,26 @@ Run ONCE before each gameweek. Output: predictions_cache.json
 Usage:
     python run_pipeline.py              # auto-detects next gameweek
     python run_pipeline.py --gw 33      # force a specific matchweek
+
+Model/feature/market logic lives in ``inference.py`` so the CLI and the app
+share one serving path.
 """
-import argparse, json, math, os, re, sys
+import argparse, json, os, sys
 from datetime import datetime
 import joblib, pandas as pd
 import requests
 from dotenv import load_dotenv
-from team_aliases import badge_lookup_key
+from persistence import archive_predictions
 from features import (
-    MODEL_FEATURE_COLS,
     compute_current_elo,
-    detect_model_features,
-    ensure_model_features,
     normalize_elo_columns,
     patch_model_runtime_compat,
+)
+from inference import (
+    add_corner_outputs,
+    add_ht_outputs,
+    add_poisson_outputs,
+    predict_matches,
 )
 
 load_dotenv()
@@ -36,337 +42,6 @@ HT_HOME_FILE   = os.path.join(APP_DIR, "goal_model_ht_home.pkl")
 HT_AWAY_FILE   = os.path.join(APP_DIR, "goal_model_ht_away.pkl")
 CORNER_HOME_FILE = os.path.join(APP_DIR, "corner_model_home.pkl")
 CORNER_AWAY_FILE = os.path.join(APP_DIR, "corner_model_away.pkl")
-HISTORY_DIR    = os.path.join(APP_DIR, "predictions_history")
-
-
-TEAM_BADGES: dict[str, str] = {
-    "Arsenal":                 "https://resources.premierleague.com/premierleague/badges/t3.png",
-    "Aston Villa":             "https://resources.premierleague.com/premierleague/badges/t7.png",
-    "Bournemouth":             "https://resources.premierleague.com/premierleague/badges/t91.png",
-    "Brentford":               "https://resources.premierleague.com/premierleague/badges/t94.png",
-    "Brighton & Hove Albion":  "https://resources.premierleague.com/premierleague/badges/t36.png",
-    "Burnley":                 "https://resources.premierleague.com/premierleague/badges/t90.png",
-    "Chelsea":                 "https://resources.premierleague.com/premierleague/badges/t8.png",
-    "Coventry City":           "https://resources.premierleague.com/premierleague25/badges-alt/9.svg",
-    "Crystal Palace":          "https://resources.premierleague.com/premierleague/badges/t31.png",
-    "Everton":                 "https://resources.premierleague.com/premierleague/badges/t11.png",
-    "Fulham":                  "https://resources.premierleague.com/premierleague/badges/t54.png",
-    "Hull City":               "https://resources.premierleague.com/premierleague25/badges-alt/88.svg",
-    "Ipswich Town":            "https://resources.premierleague.com/premierleague25/badges-alt/40.svg",
-    "Leeds United":            "https://resources.premierleague.com/premierleague/badges/t2.png",
-    "Liverpool":               "https://resources.premierleague.com/premierleague/badges/t14.png",
-    "Manchester City":         "https://resources.premierleague.com/premierleague/badges/t43.png",
-    "Manchester United":       "https://resources.premierleague.com/premierleague/badges/t1.png",
-    "Newcastle":               "https://resources.premierleague.com/premierleague/badges/t4.png",
-    "Nottingham Forest":       "https://resources.premierleague.com/premierleague/badges/t17.png",
-    "Sunderland":              "https://resources.premierleague.com/premierleague/badges/t56.png",
-    "Tottenham Hotspur":       "https://resources.premierleague.com/premierleague/badges/t6.png",
-    "West Ham United":         "https://resources.premierleague.com/premierleague/badges/t21.png",
-    "Wolverhampton Wanderers": "https://resources.premierleague.com/premierleague/badges/t39.png",
-}
-FALLBACK_BADGE = "https://resources.premierleague.com/premierleague/badges/t0.png"
-
-
-def run_model(upcoming: pd.DataFrame, model, df_elo: pd.DataFrame) -> pd.DataFrame:
-    feature_cols_for_model = detect_model_features(model) or MODEL_FEATURE_COLS
-    upcoming = ensure_model_features(upcoming, df_elo, feature_cols_for_model)
-    probs = model.predict_proba(upcoming[feature_cols_for_model])
-    # Model classes are encoded as 0=Away, 1=Draw, 2=Home.
-    upcoming["prob_away"] = probs[:, 0]
-    upcoming["prob_draw"] = probs[:, 1]
-    upcoming["prob_home"] = probs[:, 2]
-    upcoming["fair_odds_home"] = 1 / upcoming["prob_home"]
-    upcoming["fair_odds_draw"] = 1 / upcoming["prob_draw"]
-    upcoming["fair_odds_away"] = 1 / upcoming["prob_away"]
-    upcoming["disp_odds_home"] = upcoming["fair_odds_home"].map(lambda v: f"{v:.3g}")
-    upcoming["disp_odds_draw"] = upcoming["fair_odds_draw"].map(lambda v: f"{v:.3g}")
-    upcoming["disp_odds_away"] = upcoming["fair_odds_away"].map(lambda v: f"{v:.3g}")
-    upcoming["disp_prob_home"] = upcoming["prob_home"].map(lambda v: f"{v*100:.1f}%")
-    upcoming["disp_prob_draw"] = upcoming["prob_draw"].map(lambda v: f"{v*100:.1f}%")
-    upcoming["disp_prob_away"] = upcoming["prob_away"].map(lambda v: f"{v*100:.1f}%")
-    upcoming["disp_elo_diff"]  = upcoming["elo_diff"].map(lambda v: f"{v:+.0f}")
-    upcoming["badge_home"]     = upcoming["home_team"].map(
-        lambda t: TEAM_BADGES.get(badge_lookup_key(str(t)), FALLBACK_BADGE)
-    )
-    upcoming["badge_away"]     = upcoming["away_team"].map(
-        lambda t: TEAM_BADGES.get(badge_lookup_key(str(t)), FALLBACK_BADGE)
-    )
-    upcoming["chart_label"]    = upcoming.apply(
-        lambda r: r["home_team"][:3].upper() + " v " + r["away_team"][:3].upper(), axis=1
-    )
-    upcoming["model_pick"] = upcoming.apply(
-        lambda r: max(
-            [("H", r["prob_home"]), ("D", r["prob_draw"]), ("A", r["prob_away"])],
-            key=lambda x: x[1],
-        )[0], axis=1,
-    )
-
-    # Optional bookmaker odds (from fixtures.csv if provided).
-    has_book_cols = all(c in upcoming.columns for c in ("B365H", "B365D", "B365A"))
-    if has_book_cols:
-        book_h = pd.to_numeric(upcoming["B365H"], errors="coerce")
-        book_d = pd.to_numeric(upcoming["B365D"], errors="coerce")
-        book_a = pd.to_numeric(upcoming["B365A"], errors="coerce")
-        valid = (book_h > 0) & (book_d > 0) & (book_a > 0)
-
-        upcoming["book_odds_home"] = book_h.where(valid, pd.NA)
-        upcoming["book_odds_draw"] = book_d.where(valid, pd.NA)
-        upcoming["book_odds_away"] = book_a.where(valid, pd.NA)
-
-        inv_h = (1.0 / book_h).where(valid, pd.NA)
-        inv_d = (1.0 / book_d).where(valid, pd.NA)
-        inv_a = (1.0 / book_a).where(valid, pd.NA)
-        total = (inv_h + inv_d + inv_a).where(valid, pd.NA)
-
-        upcoming["book_prob_home"] = (inv_h / total).where(valid, pd.NA)
-        upcoming["book_prob_draw"] = (inv_d / total).where(valid, pd.NA)
-        upcoming["book_prob_away"] = (inv_a / total).where(valid, pd.NA)
-
-        upcoming["disp_book_odds_home"] = upcoming["book_odds_home"].map(lambda v: f"{v:.3g}" if pd.notna(v) else "")
-        upcoming["disp_book_odds_draw"] = upcoming["book_odds_draw"].map(lambda v: f"{v:.3g}" if pd.notna(v) else "")
-        upcoming["disp_book_odds_away"] = upcoming["book_odds_away"].map(lambda v: f"{v:.3g}" if pd.notna(v) else "")
-        upcoming["disp_book_prob_home"] = upcoming["book_prob_home"].map(lambda v: f"{v*100:.1f}%" if pd.notna(v) else "")
-        upcoming["disp_book_prob_draw"] = upcoming["book_prob_draw"].map(lambda v: f"{v*100:.1f}%" if pd.notna(v) else "")
-        upcoming["disp_book_prob_away"] = upcoming["book_prob_away"].map(lambda v: f"{v*100:.1f}%" if pd.notna(v) else "")
-    else:
-        for col in (
-            "book_odds_home", "book_odds_draw", "book_odds_away",
-            "book_prob_home", "book_prob_draw", "book_prob_away",
-        ):
-            upcoming[col] = pd.NA
-        for col in (
-            "disp_book_odds_home", "disp_book_odds_draw", "disp_book_odds_away",
-            "disp_book_prob_home", "disp_book_prob_draw", "disp_book_prob_away",
-        ):
-            upcoming[col] = ""
-    return upcoming
-
-
-def _goal_model_features(goal_model) -> list[str]:
-    if hasattr(goal_model, "feature_names_in_"):
-        return [str(c) for c in list(getattr(goal_model, "feature_names_in_", []))]
-    if hasattr(goal_model, "named_steps"):
-        for step in goal_model.named_steps.values():
-            if hasattr(step, "feature_names_in_"):
-                return [str(c) for c in list(getattr(step, "feature_names_in_", []))]
-    return []
-
-
-def _scoreline_probs(lambda_home: float, lambda_away: float, max_goals: int, rho: float, over_lines) -> dict:
-    """Shared scoreline engine: H/D/A, over-line probs, BTTS, top scores.
-
-    ``over_lines`` is a list of thresholds like [1.5, 2.5, 3.5, 4.5].
-    """
-    lambda_home = max(float(lambda_home), 0.05)
-    lambda_away = max(float(lambda_away), 0.05)
-
-    home_probs = [
-        math.exp(-lambda_home) * (lambda_home ** goals) / math.factorial(goals)
-        for goals in range(max_goals + 1)
-    ]
-    away_probs = [
-        math.exp(-lambda_away) * (lambda_away ** goals) / math.factorial(goals)
-        for goals in range(max_goals + 1)
-    ]
-
-    def tau(h: int, a: int) -> float:
-        if h == 0 and a == 0:
-            return max(1.0 - lambda_home * lambda_away * rho, 0.01)
-        if h == 0 and a == 1:
-            return max(1.0 + lambda_home * rho, 0.01)
-        if h == 1 and a == 0:
-            return max(1.0 + lambda_away * rho, 0.01)
-        if h == 1 and a == 1:
-            return max(1.0 - rho, 0.01)
-        return 1.0
-
-    score_probs: list[dict] = []
-    p_home = 0.0
-    p_draw = 0.0
-    p_away = 0.0
-    over = {line: 0.0 for line in over_lines}
-    p_btts = 0.0
-    for h in range(max_goals + 1):
-        for a in range(max_goals + 1):
-            p = home_probs[h] * away_probs[a] * tau(h, a)
-            if h > a:
-                p_home += p
-            elif h == a:
-                p_draw += p
-            else:
-                p_away += p
-            for line in over_lines:
-                if h + a > line:
-                    over[line] += p
-            if h > 0 and a > 0:
-                p_btts += p
-            score_probs.append({"score": f"{h}-{a}", "p": p})
-
-    # Normalize H/D/A to absorb the tiny tail beyond max_goals.
-    total = p_home + p_draw + p_away
-    if total > 0:
-        p_home, p_draw, p_away = p_home / total, p_draw / total, p_away / total
-
-    top_scores = sorted(score_probs, key=lambda x: x["p"], reverse=True)
-    return {
-        "p_home": p_home, "p_draw": p_draw, "p_away": p_away,
-        "over": over, "p_btts": p_btts, "top_scores": top_scores,
-    }
-
-
-def poisson_markets(lambda_home: float, lambda_away: float, *, max_goals: int = 6, top_k: int = 5, rho: float = -0.12) -> dict:
-    """Full-time Poisson markets with a Dixon-Coles low-score correction.
-
-    ``rho`` (< 0) boosts 0-0 / 1-0 / 0-1 / 1-1 scorelines (draw-heavy results).
-    Returns O1.5 / O2.5 / O3.5 / O4.5 total-goal probabilities plus BTTS.
-    """
-    res = _scoreline_probs(lambda_home, lambda_away, max_goals, rho, [1.5, 2.5, 3.5, 4.5])
-    return {
-        "poisson_prob_home": res["p_home"],
-        "poisson_prob_draw": res["p_draw"],
-        "poisson_prob_away": res["p_away"],
-        "poisson_over_15": res["over"][1.5],
-        "poisson_over_25": res["over"][2.5],
-        "poisson_over_35": res["over"][3.5],
-        "poisson_over_45": res["over"][4.5],
-        "poisson_btts": res["p_btts"],
-        "poisson_correct_scores": [
-            {
-                "score": s["score"],
-                "p": round(float(s["p"]), 6),
-                "disp_p": f"{float(s['p']) * 100:.1f}%",
-            }
-            for s in res["top_scores"][:top_k]
-        ],
-    }
-
-
-def ht_markets(lambda_home: float, lambda_away: float, *, max_goals: int = 4, rho: float = -0.15) -> dict:
-    """Half-time markets: HT H/D/A + HT O0.5/O1.5/O2.5 goals (Dixon-Coles)."""
-    res = _scoreline_probs(lambda_home, lambda_away, max_goals, rho, [0.5, 1.5, 2.5])
-    return {
-        "ht_prob_home": res["p_home"],
-        "ht_prob_draw": res["p_draw"],
-        "ht_prob_away": res["p_away"],
-        "ht_over_05": res["over"][0.5],
-        "ht_over_15": res["over"][1.5],
-        "ht_over_25": res["over"][2.5],
-    }
-
-
-def corner_markets(total_lambda: float) -> dict:
-    """O/U total-corners probabilities from a Poisson on the summed lambda."""
-    total_lambda = max(float(total_lambda), 0.5)
-
-    def _cdf(k: int) -> float:
-        return sum(math.exp(-total_lambda) * total_lambda ** n / math.factorial(n) for n in range(k + 1))
-
-    out: dict[str, float] = {}
-    for line in (8.5, 9.5, 10.5, 11.5, 12.5):
-        out[f"corner_over_{str(line).replace('.', '')}"] = 1.0 - _cdf(int(math.floor(line)))
-    return out
-
-
-def _disp_poisson_vs_ensemble_row(r: pd.Series) -> str:
-    """Poisson minus ensemble outcome probabilities, in percentage points."""
-    try:
-        e_h, e_d, e_a = float(r["prob_home"]), float(r["prob_draw"]), float(r["prob_away"])
-        p_h, p_d, p_a = (
-            float(r["poisson_prob_home"]),
-            float(r["poisson_prob_draw"]),
-            float(r["poisson_prob_away"]),
-        )
-    except (TypeError, ValueError, KeyError):
-        return "—"
-    d_h = (p_h - e_h) * 100.0
-    d_d = (p_d - e_d) * 100.0
-    d_a = (p_a - e_a) * 100.0
-    return f"Poisson−ens. (pp): H {d_h:+.0f} · D {d_d:+.0f} · A {d_a:+.0f}"
-
-
-def add_poisson_outputs(upcoming: pd.DataFrame, home_goal_model, away_goal_model, df_elo: pd.DataFrame) -> pd.DataFrame:
-    home_features = _goal_model_features(home_goal_model)
-    away_features = _goal_model_features(away_goal_model)
-    if not home_features or not away_features:
-        return upcoming
-
-    all_features = sorted(set(home_features) | set(away_features))
-    upcoming = ensure_model_features(upcoming, df_elo, all_features)
-    lambda_home = home_goal_model.predict(upcoming[home_features])
-    lambda_away = away_goal_model.predict(upcoming[away_features])
-
-    upcoming["lambda_home"] = pd.Series(lambda_home).clip(lower=0.05)
-    upcoming["lambda_away"] = pd.Series(lambda_away).clip(lower=0.05)
-    markets = upcoming.apply(
-        lambda r: poisson_markets(float(r["lambda_home"]), float(r["lambda_away"])),
-        axis=1,
-    )
-    market_df = pd.DataFrame(list(markets))
-    for col in market_df.columns:
-        upcoming[col] = market_df[col]
-
-    upcoming["disp_lambda_home"] = upcoming["lambda_home"].map(lambda v: f"{v:.2f}")
-    upcoming["disp_lambda_away"] = upcoming["lambda_away"].map(lambda v: f"{v:.2f}")
-    upcoming["disp_poisson_prob_home"] = upcoming["poisson_prob_home"].map(lambda v: f"{v*100:.1f}%")
-    upcoming["disp_poisson_prob_draw"] = upcoming["poisson_prob_draw"].map(lambda v: f"{v*100:.1f}%")
-    upcoming["disp_poisson_prob_away"] = upcoming["poisson_prob_away"].map(lambda v: f"{v*100:.1f}%")
-    tot_lambda = upcoming["lambda_home"] + upcoming["lambda_away"]
-    upcoming["disp_poisson_xg_total"] = tot_lambda.map(lambda v: f"{float(v):.2f}")
-    for line, disp in ((1.5, "disp_poisson_o15"), (2.5, "disp_poisson_o25"),
-                       (3.5, "disp_poisson_o35"), (4.5, "disp_poisson_o45")):
-        upcoming[disp] = upcoming[f"poisson_over_{str(line).replace('.', '')}"].map(
-            lambda v: f"{float(v) * 100:.1f}%")
-    upcoming["disp_poisson_btts"] = upcoming["poisson_btts"].map(lambda v: f"{float(v) * 100:.1f}%")
-    upcoming["disp_poisson_vs_ensemble"] = upcoming.apply(_disp_poisson_vs_ensemble_row, axis=1)
-    return upcoming
-
-
-def add_ht_outputs(upcoming: pd.DataFrame, ht_home_model, ht_away_model, df_elo: pd.DataFrame) -> pd.DataFrame:
-    """Half-time markets: HT H/D/A + HT O0.5/O1.5/O2.5 goals."""
-    home_features = _goal_model_features(ht_home_model)
-    away_features = _goal_model_features(ht_away_model)
-    if not home_features or not away_features:
-        return upcoming
-    all_features = sorted(set(home_features) | set(away_features))
-    upcoming = ensure_model_features(upcoming, df_elo, all_features)
-    upcoming["lambda_ht_home"] = pd.Series(ht_home_model.predict(upcoming[home_features])).clip(lower=0.05)
-    upcoming["lambda_ht_away"] = pd.Series(ht_away_model.predict(upcoming[away_features])).clip(lower=0.05)
-    markets = upcoming.apply(
-        lambda r: ht_markets(float(r["lambda_ht_home"]), float(r["lambda_ht_away"])), axis=1)
-    market_df = pd.DataFrame(list(markets))
-    for col in market_df.columns:
-        upcoming[col] = market_df[col]
-    upcoming["disp_lambda_ht_home"] = upcoming["lambda_ht_home"].map(lambda v: f"{v:.2f}")
-    upcoming["disp_lambda_ht_away"] = upcoming["lambda_ht_away"].map(lambda v: f"{v:.2f}")
-    upcoming["disp_ht_prob_home"] = upcoming["ht_prob_home"].map(lambda v: f"{v*100:.1f}%")
-    upcoming["disp_ht_prob_draw"] = upcoming["ht_prob_draw"].map(lambda v: f"{v*100:.1f}%")
-    upcoming["disp_ht_prob_away"] = upcoming["ht_prob_away"].map(lambda v: f"{v*100:.1f}%")
-    upcoming["disp_ht_o05"] = upcoming["ht_over_05"].map(lambda v: f"{float(v)*100:.1f}%")
-    upcoming["disp_ht_o15"] = upcoming["ht_over_15"].map(lambda v: f"{float(v)*100:.1f}%")
-    upcoming["disp_ht_o25"] = upcoming["ht_over_25"].map(lambda v: f"{float(v)*100:.1f}%")
-    return upcoming
-
-
-def add_corner_outputs(upcoming: pd.DataFrame, corner_home_model, corner_away_model, df_elo: pd.DataFrame) -> pd.DataFrame:
-    """Total-corners markets: per-side lambda + O8.5..O12.5 probabilities."""
-    home_features = _goal_model_features(corner_home_model)
-    away_features = _goal_model_features(corner_away_model)
-    if not home_features or not away_features:
-        return upcoming
-    all_features = sorted(set(home_features) | set(away_features))
-    upcoming = ensure_model_features(upcoming, df_elo, all_features)
-    upcoming["corner_home"] = pd.Series(corner_home_model.predict(upcoming[home_features])).clip(lower=0.5)
-    upcoming["corner_away"] = pd.Series(corner_away_model.predict(upcoming[away_features])).clip(lower=0.5)
-    upcoming["corner_total"] = upcoming["corner_home"] + upcoming["corner_away"]
-    markets = upcoming.apply(lambda r: corner_markets(float(r["corner_total"])), axis=1)
-    market_df = pd.DataFrame(list(markets))
-    for col in market_df.columns:
-        upcoming[col] = market_df[col]
-    upcoming["disp_corner_total"] = upcoming["corner_total"].map(lambda v: f"{float(v):.1f}")
-    for line in (8.5, 9.5, 10.5, 11.5, 12.5):
-        key = f"corner_over_{str(line).replace('.', '')}"
-        upcoming[f"disp_{key}"] = upcoming[key].map(lambda v: f"{float(v)*100:.1f}%")
-    return upcoming
 
 
 ODDS_API_URL = "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
@@ -497,10 +172,10 @@ def main():
     args = parser.parse_args()
 
     for path, hint in [
-        (MODEL_FILE,    "Run FeatureEng.py first."),
+        (MODEL_FILE,    "Run train_ensemble.py first."),
         (GOAL_HOME_FILE, "Run train_ensemble.py first."),
         (GOAL_AWAY_FILE, "Run train_ensemble.py first."),
-        (ELO_FILE,      "Run ELO.py first."),
+        (ELO_FILE,      "Run feature_engineering.py first."),
         (FIXTURES_FILE, "fixtures.csv must have: matchweek, date, home_team, away_team"),
     ]:
         if not os.path.exists(path):
@@ -523,10 +198,13 @@ def main():
     df_fix["date"] = pd.to_datetime(df_fix["date"], dayfirst=True, errors="coerce").dt.normalize()
     df_fix = df_fix.dropna(subset=["date", "home_team", "away_team"])
 
+    # Fixture dates are UK calendar dates → compare against Europe/London
+    # date. Asia/Hong_Kong is 7-8h ahead and flips GW a day early (e.g.
+    # 2026-09-14 17:40 UTC is still Sep 14 in London but already Sep 15 in HK).
     try:
         from zoneinfo import ZoneInfo
 
-        today = pd.Timestamp(datetime.now(ZoneInfo("Asia/Hong_Kong")).date())
+        today = pd.Timestamp(datetime.now(ZoneInfo("Europe/London")).date())
     except Exception:
         today = pd.Timestamp.today().normalize()
     future = df_fix[df_fix["date"] >= today].sort_values("date")
@@ -609,7 +287,7 @@ def main():
             selected_cols.append(col)
     upcoming = selected[selected_cols].copy().reset_index(drop=True)
     upcoming = compute_current_elo(upcoming, df_elo)
-    upcoming = run_model(upcoming, model, df_elo)
+    upcoming = predict_matches(upcoming, model, df_elo)
     upcoming = add_poisson_outputs(upcoming, goal_model_home, goal_model_away, df_elo)
     if ht_model_home is not None and ht_model_away is not None:
         upcoming = add_ht_outputs(upcoming, ht_model_home, ht_model_away, df_elo)
@@ -641,18 +319,15 @@ def main():
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
 
-    gw_match = re.search(r"\d+", str(gw_label))
-    if gw_match:
-        os.makedirs(HISTORY_DIR, exist_ok=True)
-        archive_path = os.path.join(HISTORY_DIR, f"GW{gw_match.group(0)}.json")
-        # Never overwrite an existing archive: it may hold bookmaker odds fetched
-        # pre-match (unavailable once matches start) and drives wallet/grading.
-        if os.path.exists(archive_path):
-            print(f"   Archive {archive_path} already exists — kept (cache only updated).")
-        else:
-            with open(archive_path, "w", encoding="utf-8") as f:
-                json.dump(cache, f, indent=2)
+    archived = archive_predictions(cache, gw_label)
+    if archived is not None:
+        archive_path, created = archived
+        # Existing archives are kept: they may hold pre-match bookmaker odds
+        # (unavailable once matches start) and drive grading/wallets.
+        if created:
             print(f"   Archived snapshot → {archive_path}")
+        else:
+            print(f"   Archive {archive_path} already exists — kept (cache only updated).")
 
     print(f"\n{'─'*72}")
     print(f"{'HOME':<26}  {'AWAY':<26}  H%    D%    A%   Pick")

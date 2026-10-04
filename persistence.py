@@ -15,19 +15,26 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Any
 
 import pandas as pd
 
 from team_aliases import fixture_lookup_key
 
-from data_urls import results_csv_url
+from data_urls import remote_first, results_csv_url
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_DIR = os.path.join(APP_DIR, "predictions_history")
 RESULTS_FILE = os.path.join(APP_DIR, "results.csv")
 USER_PICKS_FILE = os.path.join(APP_DIR, "user_picks.json")
 BANKROLL_FILE = os.path.join(APP_DIR, "bankroll.json")
+
+# Process-wide caches. The app rebuilds history + bankroll back-to-back and
+# would otherwise re-read every archive and re-fetch results.csv twice per load.
+_ARCHIVE_CACHE: tuple[float, dict[int, dict[str, Any]]] | None = None
+_RESULTS_CACHE: tuple[float, tuple, dict[tuple[int, str, str], dict[str, Any]]] | None = None
+_RESULTS_CACHE_TTL = 60.0
 
 
 def _norm(name: Any) -> str:
@@ -39,11 +46,50 @@ def _gw_from_filename(name: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def gw_from_label(label: Any) -> int | None:
+    """Extract a GW number from a label like 'GW4' (None for 'Next (Apr 11)')."""
+    m = re.search(r"GW\s*(\d+)", str(label or ""), re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def archive_predictions(cache: dict[str, Any], gw_label: Any) -> tuple[str, bool] | None:
+    """Archive a cache snapshot at ``predictions_history/GW{N}.json``.
+
+    Existing archives are **never overwritten**: they may hold pre-match
+    bookmaker odds that cannot be refetched after kick-off and they drive
+    grading/wallets. Writes are atomic (temp file + replace).
+
+    Returns ``(path, created)``, or ``None`` when no GW number could be parsed
+    from ``gw_label``.
+    """
+    gw = gw_from_label(gw_label)
+    if gw is None:
+        return None
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    path = os.path.join(HISTORY_DIR, f"GW{gw}.json")
+    if os.path.exists(path):
+        return path, False
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+    os.replace(tmp, path)
+    global _ARCHIVE_CACHE
+    _ARCHIVE_CACHE = None  # directory changed -> force the next read to refresh
+    return path, True
+
+
 def load_archived_predictions() -> dict[int, dict[str, Any]]:
     """Return {gw_number: cache_dict} for every predictions_history/GW*.json."""
+    global _ARCHIVE_CACHE
     out: dict[int, dict[str, Any]] = {}
     if not os.path.isdir(HISTORY_DIR):
         return out
+    try:
+        dir_mtime = os.path.getmtime(HISTORY_DIR)
+    except OSError:
+        dir_mtime = -1.0
+    if _ARCHIVE_CACHE is not None and _ARCHIVE_CACHE[0] == dir_mtime:
+        return _ARCHIVE_CACHE[1]
     for fname in os.listdir(HISTORY_DIR):
         if not fname.lower().endswith(".json"):
             continue
@@ -56,6 +102,7 @@ def load_archived_predictions() -> dict[int, dict[str, Any]]:
                 out[gw] = json.load(f)
         except Exception:
             continue
+    _ARCHIVE_CACHE = (dir_mtime, out)
     return out
 
 
@@ -72,14 +119,7 @@ def _result_letter(home_goals: Any, away_goals: Any) -> str | None:
     return "D"
 
 
-def _results_dataframe() -> pd.DataFrame | None:
-    """Load results from env, remote_data_urls.json, or results.csv."""
-    url = results_csv_url()
-    if url:
-        try:
-            return pd.read_csv(url)
-        except Exception:
-            pass
+def _local_results_dataframe() -> pd.DataFrame | None:
     if not os.path.exists(RESULTS_FILE):
         return None
     try:
@@ -88,14 +128,43 @@ def _results_dataframe() -> pd.DataFrame | None:
         return None
 
 
-def load_results() -> dict[tuple[int, str, str], dict[str, Any]]:
+def _results_dataframe(prefer_local: bool = False) -> pd.DataFrame | None:
+    """Load results from results.csv, env, or remote_data_urls.json.
+
+    Local first when ``prefer_local`` (or when ``AUGO_LOCAL_DATA=1`` is set),
+    so the local pipeline never grades against a stale published CSV.
+    Remote-first stays the default for deployed apps.
+    """
+    local = _local_results_dataframe()
+    url = results_csv_url()
+    if not url:
+        return local
+    if prefer_local or not remote_first():
+        if local is not None:
+            return local
+    try:
+        return pd.read_csv(url)
+    except Exception:
+        return local
+
+
+def load_results(prefer_local: bool = False) -> dict[tuple[int, str, str], dict[str, Any]]:
     """Return {(gw, home_short, away_short): {actual, home_goals, away_goals}}.
 
-    Reads results.csv, or a public CSV URL from env / remote_data_urls.json
-    when set (for deployed apps). Missing / invalid -> empty dict.
+    Set ``prefer_local=True`` (pipeline/evaluation paths) to read the local
+    results.csv before a configured remote URL. Missing / invalid -> empty dict.
+    Results are cached in-process for ``_RESULTS_CACHE_TTL`` seconds.
     """
+    global _RESULTS_CACHE
+    cache_key = (bool(prefer_local), remote_first(), results_csv_url() or "")
+    now = time.monotonic()
+    if _RESULTS_CACHE is not None:
+        cached_at, key, value = _RESULTS_CACHE
+        if key == cache_key and (now - cached_at) < _RESULTS_CACHE_TTL:
+            return value
+
     out: dict[tuple[int, str, str], dict[str, Any]] = {}
-    df = _results_dataframe()
+    df = _results_dataframe(prefer_local=prefer_local)
     if df is None:
         return out
     needed = {"gameweek", "home_team", "away_team", "home_goals", "away_goals"}
@@ -116,6 +185,7 @@ def load_results() -> dict[tuple[int, str, str], dict[str, Any]]:
             "home_goals": int(row["home_goals"]),
             "away_goals": int(row["away_goals"]),
         }
+    _RESULTS_CACHE = (now, cache_key, out)
     return out
 
 

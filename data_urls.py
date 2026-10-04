@@ -41,3 +41,19 @@ def results_csv_url() -> str:
     if u:
         return u
     return str(_load_file().get("results_url", "")).strip()
+
+
+def remote_first() -> bool:
+    """Whether configured remote URLs should win over local files.
+
+    Default is remote-first so the deployed Reflex Cloud app keeps reading the
+    freshly published data repo. Set ``AUGO_LOCAL_DATA=1`` (or
+    ``AUGO_USE_LOCAL_DATA=1``) to make local files win, which is what the local
+    pipeline/scheduler wants so it never grades against stale remote data.
+    """
+    val = (
+        os.getenv("AUGO_LOCAL_DATA")
+        or os.getenv("AUGO_USE_LOCAL_DATA")
+        or ""
+    ).strip().lower()
+    return val not in ("1", "true", "yes")

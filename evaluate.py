@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from typing import Any
 
@@ -27,6 +28,7 @@ import pandas as pd
 
 from persistence import load_archived_predictions, load_results, load_user_picks
 from team_aliases import fixture_lookup_key
+from metrics import brier_multiclass, expected_calibration_error
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPORT_FILE = os.path.join(APP_DIR, "evaluation_report.json")
@@ -42,38 +44,13 @@ def _f(v: Any, default: float | None = None) -> float | None:
         return default
 
 
-def brier_multiclass(probs: np.ndarray, y_true: np.ndarray) -> float:
-    n = len(y_true)
-    one_hot = np.zeros((n, probs.shape[1]))
-    one_hot[np.arange(n), y_true] = 1.0
-    return float(np.mean((probs - one_hot) ** 2))
-
-
-def expected_calibration_error(probs: np.ndarray, y_true: np.ndarray, bins: int = 10) -> float:
-    conf = probs.max(axis=1)
-    preds = probs.argmax(axis=1)
-    correct = (preds == y_true).astype(float)
-    ece = 0.0
-    rows = []
-    edges = np.linspace(0.0, 1.0, bins + 1)
-    for i in range(bins):
-        mask = (conf > edges[i]) & (conf <= edges[i + 1])
-        if mask.sum() == 0:
-            continue
-        acc = float(correct[mask].mean())
-        avg = float(conf[mask].mean())
-        ece += (mask.sum() / len(y_true)) * abs(acc - avg)
-        rows.append((mask.sum(), acc, avg))
-    return float(ece), rows
-
-
 def _money(v: float) -> str:
     return f"{v:+.2f}u" if v >= 0 else f"{v:.2f}u"
 
 
-def _collect() -> tuple[list[dict[str, Any]], dict[int, dict[int, str]]]:
+def collect() -> tuple[list[dict[str, Any]], dict[int, dict[int, str]]]:
     archives = load_archived_predictions()
-    results = load_results()
+    results = load_results(prefer_local=True)
     picks = load_user_picks()
 
     records: list[dict[str, Any]] = []
@@ -101,7 +78,11 @@ def _collect() -> tuple[list[dict[str, Any]], dict[int, dict[int, str]]]:
                 "D": _f(p.get("book_odds_draw"), _f(p.get("B365D"))),
                 "A": _f(p.get("book_odds_away"), _f(p.get("B365A"))),
             }
-            user_pick = str(picks.get(gw, {}).get(int(p.get("match_idx", i)), ""))
+            try:
+                match_idx = int(p.get("match_idx", i))
+            except (TypeError, ValueError):
+                match_idx = i
+            user_pick = str(picks.get(gw, {}).get(match_idx, ""))
             records.append({
                 "gw": gw,
                 "date": str(p.get("date", ""))[:10],
@@ -142,23 +123,28 @@ def _is_value(r: dict) -> bool:
     return r["probs"][r["model_pick"]] > book_p[r["model_pick"]] + 0.005
 
 
-def _metrics(sub: pd.DataFrame) -> dict[str, Any]:
+def _mean_finite(values: list) -> float:
+    """Mean over finite values, or NaN when none are available."""
+    vals = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+    return float(np.mean(vals)) if vals else float("nan")
+
+
+def metrics(sub: pd.DataFrame) -> dict[str, Any]:
     """Accuracy / log-loss / Brier / ECE / ROIs for a set of settled records."""
     if sub.empty:
         return {}
-    probs = np.array([[
-        sub.iloc[j]["probs"][o] for o in OUTCOMES
-    ] for j in range(len(sub))])
-    y = np.array([OUTCOMES.index(a) for a in sub["actual"]])
-    pred = np.array([OUTCOMES.index(mp) for mp in sub["model_pick"]])
+    records = sub.to_dict("records")
+    probs = np.array([[r["probs"][o] for o in OUTCOMES] for r in records])
+    y = np.array([OUTCOMES.index(r["actual"]) for r in records])
+    pred = np.array([OUTCOMES.index(r["model_pick"]) for r in records])
     acc = float(np.mean(pred == y))
     ll = float(-np.mean(np.log(np.clip(probs[np.arange(len(y)), y], 1e-12, None))))
     br = brier_multiclass(probs, y)
     ece, _rows = expected_calibration_error(probs, y)
-    fair_roi = float(np.nanmean([_roi_fair(r) for r in sub.to_dict("records")]))
-    book_roi = float(np.nanmean([_roi_book(r) for r in sub.to_dict("records")]))
-    value = [r for r in sub.to_dict("records") if _is_value(r)]
-    value_roi = float(np.nanmean([_roi_book(r) for r in value])) if value else float("nan")
+    fair_roi = _mean_finite([_roi_fair(r) for r in records])
+    book_roi = _mean_finite([_roi_book(r) for r in records])
+    value = [r for r in records if _is_value(r)]
+    value_roi = _mean_finite([_roi_book(r) for r in value]) if value else float("nan")
     return {
         "matches": len(sub),
         "accuracy": acc,
@@ -177,7 +163,7 @@ def main() -> None:
     parser.add_argument("--json", action="store_true", help="write evaluation_report.json")
     args = parser.parse_args()
 
-    records, _picks = _collect()
+    records, _picks = collect()
     if not records:
         print("No settled matches found (predictions_history + results.csv).")
         return
@@ -190,13 +176,13 @@ def main() -> None:
     print(f"{'GW':<5}{'N':>4}{'Acc':>8}{'LogLoss':>9}{'Brier':>8}{'ECE':>8}{'ROI(fair)':>11}{'ROI(book)':>11}")
     for gw in sorted(df["gw"].unique()):
         sub = df[df["gw"] == gw]
-        m = _metrics(sub)
+        m = metrics(sub)
         if not m:
             continue
         print(f"{gw:<5}{m['matches']:>4}{m['accuracy']:>8.1%}{m['log_loss']:>9.3f}"
               f"{m['brier']:>8.4f}{m['ece']:>8.3f}{_money(m['roi_fair']):>11}{_money(m['roi_book']):>11}")
     print("-" * 78)
-    cum = _metrics(df)
+    cum = metrics(df)
     print(f"{'ALL':<5}{cum['matches']:>4}{cum['accuracy']:>8.1%}{cum['log_loss']:>9.3f}"
           f"{cum['brier']:>8.4f}{cum['ece']:>8.3f}{_money(cum['roi_fair']):>11}{_money(cum['roi_book']):>11}")
     print()
@@ -224,7 +210,7 @@ def main() -> None:
     if args.json:
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
             json.dump({"cumulative": cum, "per_gameweek": {
-                str(g): _metrics(df[df["gw"] == g]) for g in sorted(df["gw"].unique())
+                str(g): metrics(df[df["gw"] == g]) for g in sorted(df["gw"].unique())
             }}, f, indent=2)
         print(f"\nReport written -> {REPORT_FILE}")
 

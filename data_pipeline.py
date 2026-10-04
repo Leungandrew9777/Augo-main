@@ -1,6 +1,5 @@
 # data_pipeline.py
 import pandas as pd
-from pathlib import Path
 import numpy as np
 import json
 import time
@@ -59,6 +58,9 @@ class FootballDataLoader:
                 df = self.load_season(league, season)
                 if not df.empty:
                     frames.append(df)
+        if not frames:
+            print("\n⚠️  No matches loaded from any season.")
+            return pd.DataFrame()
         result = pd.concat(frames, ignore_index=True)
         print(f"\n✅ Total matches loaded: {len(result):,}")
         return result
@@ -189,18 +191,23 @@ def merge_understat_xg(clean_df: pd.DataFrame, xg_df: pd.DataFrame) -> pd.DataFr
         return out
     xg = xg_df.copy()
     xg["date"] = pd.to_datetime(xg["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    xg["home_team"] = xg["home_team"].astype(str).str.strip()
+    xg["away_team"] = xg["away_team"].astype(str).str.strip()
     xg = xg.drop_duplicates(subset=["date", "home_team", "away_team"])
-    lookup = xg.set_index(["date", "home_team", "away_team"])
-    keys = list(zip(
-        pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y-%m-%d"),
-        out["HomeTeam"].astype(str).str.strip(),
-        out["AwayTeam"].astype(str).str.strip(),
-    ))
-    for i, key in enumerate(keys):
-        if key in lookup.index:
-            row = lookup.loc[key]
-            out.at[i, "home_xg"] = float(row["home_xg"])
-            out.at[i, "away_xg"] = float(row["away_xg"])
+
+    keys = pd.DataFrame({
+        "date": pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y-%m-%d"),
+        "home_team": out["HomeTeam"].astype(str).str.strip(),
+        "away_team": out["AwayTeam"].astype(str).str.strip(),
+    })
+    merged = keys.merge(
+        xg[["date", "home_team", "away_team", "home_xg", "away_xg"]],
+        on=["date", "home_team", "away_team"],
+        how="left",
+        sort=False,
+    )
+    out["home_xg"] = merged["home_xg"].to_numpy()
+    out["away_xg"] = merged["away_xg"].to_numpy()
     # Fall back to football-data's own xG columns (HxG/AxG) where Understat misses
     if "HxG" in out.columns:
         out["home_xg"] = out["home_xg"].fillna(pd.to_numeric(out["HxG"], errors="coerce"))
