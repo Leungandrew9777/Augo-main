@@ -1,4 +1,5 @@
 gameweek,date,home_team,away_team
+9,1/11/2026,Liverpool,Arsenal
 6,10/10/2026,Arsenal,Leeds
 6,10/10/2026,Aston Villa,Brentford
 6,10/10/2026,Chelsea,Bournemouth
@@ -19,7 +20,17 @@ gameweek,date,home_team,away_team
 4,13/9/2026,Coventry,Brighton
 4,13/9/2026,Man United,Man City
 4,14/9/2026,Leeds,Newcastle
+7,17/10/2026,Everton,Chelsea
+7,17/10/2026,Brentford,Liverpool
+7,17/10/2026,Fulham,Hull
+7,17/10/2026,Man City,Ipswich
+7,17/10/2026,Newcastle,Aston Villa
+7,18/10/2026,Bournemouth,Sunderland
+7,18/10/2026,Brighton,Crystal Palace
+7,18/10/2026,Leeds,Man United
+7,18/10/2026,Nott'm Forest,Arsenal
 5,18/9/2026,Brentford,Chelsea
+7,19/10/2026,Tottenham,Coventry
 5,19/9/2026,Tottenham,Aston Villa
 5,19/9/2026,Brighton,Arsenal
 5,19/9/2026,Everton,Ipswich
@@ -29,3 +40,21 @@ gameweek,date,home_team,away_team
 5,20/9/2026,Leeds,Crystal Palace
 5,20/9/2026,Man City,Sunderland
 5,20/9/2026,Fulham,Man United
+8,23/10/2026,Ipswich,Nott'm Forest
+8,24/10/2026,Aston Villa,Man City
+8,24/10/2026,Arsenal,Everton
+8,24/10/2026,Coventry,Fulham
+8,24/10/2026,Chelsea,Tottenham
+8,25/10/2026,Man United,Bournemouth
+8,25/10/2026,Hull,Brentford
+8,25/10/2026,Liverpool,Brighton
+8,25/10/2026,Crystal Palace,Newcastle
+8,25/10/2026,Sunderland,Leeds
+9,31/10/2026,Chelsea,Man United
+9,31/10/2026,Bournemouth,Leeds
+9,31/10/2026,Brentford,Nott'm Forest
+9,31/10/2026,Man City,Brighton
+9,31/10/2026,Coventry,Sunderland
+9,31/10/2026,Hull,Ipswich
+9,31/10/2026,Tottenham,Crystal Palace
+9,31/10/2026,Aston Villa,Fulham

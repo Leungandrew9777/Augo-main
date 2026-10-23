@@ -403,10 +403,18 @@ class State(rx.State):
                             return
                         current_gw = int(gw_series.max())
                     else:
-                        current_gw = future.iloc[0][gw_col]
+                        future_gw = future[future[gw_col].notna()]
+                        current_gw = (future_gw.iloc[0][gw_col] if not future_gw.empty
+                                      else future.iloc[0][gw_col])
                     # Pull ALL fixtures for that GW from the full df, not just future ones
                     selected = df[df[gw_col] == current_gw].sort_values("date")
-                    self.gameweek_label = f"GW{int(current_gw)}" if str(current_gw).isdigit() else f"{current_gw}"
+                    # CSV blanks can make pandas read the GW column as float (7.0);
+                    # normalise so the label is always "GW7" and matches the cache.
+                    gw_num = pd.to_numeric(current_gw, errors="coerce")
+                    if pd.notna(gw_num) and float(gw_num).is_integer():
+                        self.gameweek_label = f"GW{int(gw_num)}"
+                    else:
+                        self.gameweek_label = f"{current_gw}"
                 else:
                     # No GW column — fall back to a 4-day window around the next fixture
                     future = df[df["date"] >= today].sort_values("date")
@@ -601,47 +609,55 @@ class State(rx.State):
             for r in rows
         )
 
-    def _load_predictions_cache_dict(self) -> tuple[dict[str, Any] | None, str]:
-        """Read cache JSON from env, remote_data_urls.json, or predictions_cache.json.
+    def _load_predictions_cache_dict(self) -> tuple[list[tuple[str, dict[str, Any]]], list[str]]:
+        """Read cache JSON candidates from env/remote_data_urls.json and predictions_cache.json.
 
         Remote-first by default (deployed apps). When ``AUGO_LOCAL_DATA=1`` is
         set, the freshly written local cache wins so local development never
-        falls back to a stale published snapshot.
+        falls back to a stale published snapshot. Both readable sources are
+        returned in preference order so the caller can fall back to the other
+        one when a snapshot fails validation (e.g. a published cache whose GW
+        no longer matches the local fixtures.csv).
         """
         url = predictions_cache_url()
         local_exists = os.path.exists(CACHE_FILE)
         prefer_remote = bool(url) and remote_first()
 
-        if not prefer_remote and local_exists:
-            try:
-                with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f), ""
-            except Exception:
-                if not url:
-                    return None, "cache unreadable"
-
-        if url:
+        def _read_remote() -> tuple[bool, Any]:
             try:
                 r = requests.get(url, timeout=20)
                 r.raise_for_status()
-                return json.loads(r.text), ""
+                return True, json.loads(r.text)
             except Exception as e:
-                if not local_exists:
-                    return None, f"remote cache failed ({e}); no local file"
+                return False, f"remote cache failed ({e})"
 
-        if not local_exists:
-            return None, "cache file missing"
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f), ""
-        except Exception:
-            return None, "cache unreadable"
+        def _read_local() -> tuple[bool, Any]:
+            try:
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    return True, json.load(f)
+            except Exception:
+                return False, "cache unreadable"
 
-    def _try_load_predictions_cache(self) -> tuple[bool, str]:
-        cache, err = self._load_predictions_cache_dict()
-        if cache is None:
-            return False, err or "cache unavailable"
+        order: list[tuple[str, Any]] = [("remote", _read_remote), ("local", _read_local)]
+        if not prefer_remote:
+            order.reverse()
 
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        errors: list[str] = []
+        for source, loader in order:
+            if source == "remote" and not url:
+                continue
+            if source == "local" and not local_exists:
+                continue
+            ok, payload = loader()
+            if ok and isinstance(payload, dict):
+                candidates.append((source, payload))
+            else:
+                errors.append(str(payload))
+        return candidates, errors
+
+    def _cache_is_usable(self, cache: dict[str, Any]) -> tuple[bool, str]:
+        """Validate a cache snapshot against GW, age, and the current fixtures."""
         preds = cache.get("predictions")
         if not isinstance(preds, list) or not preds:
             return False, "cache has no predictions"
@@ -660,21 +676,36 @@ class State(rx.State):
             return False, f"cache gw mismatch ({cached_gw} vs {self.gameweek_label})"
 
         fixture_rows = [{k: v for k, v in f.items() if k != "idx"} for f in self.fixtures]
-        cache_sig = self._fixture_signature(preds)
-        fixture_sig = self._fixture_signature(fixture_rows)
-        if cache_sig != fixture_sig:
+        if self._fixture_signature(preds) != self._fixture_signature(fixture_rows):
             return False, "cache fixtures mismatch"
 
-        self.predictions = preds
-        for i in range(len(self.predictions)):
-            self.predictions[i]["match_idx"] = i
-            self._ensure_poisson_defaults(self.predictions[i])
-        self._restore_user_picks_for_current_gw()
-        self._compute_insights(pd.DataFrame(self.predictions))
-        self.prediction_source = "cache"
-        self.prediction_source_note = generated_at.strftime("%Y-%m-%d %H:%M")
-        self._archive_current_cache_if_missing(cache)
         return True, ""
+
+    def _try_load_predictions_cache(self) -> tuple[bool, str]:
+        candidates, errors = self._load_predictions_cache_dict()
+        if not candidates:
+            return False, errors[0] if errors else "cache unavailable"
+
+        reasons: list[str] = []
+        for source, cache in candidates:
+            ok, reason = self._cache_is_usable(cache)
+            if not ok:
+                reasons.append(f"{source} {reason}")
+                continue
+
+            generated_at = pd.to_datetime(cache.get("generated_at"), errors="coerce")
+            self.predictions = cache["predictions"]
+            for i in range(len(self.predictions)):
+                self.predictions[i]["match_idx"] = i
+                self._ensure_poisson_defaults(self.predictions[i])
+            self._restore_user_picks_for_current_gw()
+            self._compute_insights(pd.DataFrame(self.predictions))
+            self.prediction_source = "cache"
+            self.prediction_source_note = generated_at.strftime("%Y-%m-%d %H:%M")
+            self._archive_current_cache_if_missing(cache)
+            return True, ""
+
+        return False, "; ".join(reasons) if reasons else "cache unavailable"
 
     def _archive_current_cache_if_missing(self, cache: dict[str, Any]):
         """Write predictions_history/GW{N}.json if it doesn't yet exist."""

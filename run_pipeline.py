@@ -131,7 +131,7 @@ def fetch_odds_from_api(fixtures_df: pd.DataFrame) -> pd.DataFrame:
     b365h, b365d, b365a = [], [], []
     matched = 0
     for _, row in fixtures_df.iterrows():
-        key = (str(row["home_team"]).strip(), str(row["away_team"]).strip())
+        key = (fixture_lookup_key(str(row["home_team"])), fixture_lookup_key(str(row["away_team"])))
         if key in odds_lookup:
             h, d, a = odds_lookup[key]
             b365h.append(h)

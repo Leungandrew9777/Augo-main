@@ -3,8 +3,11 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\scheduled.ps1 -Mode weekly
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\scheduled.ps1 -Mode daily
 #
-# weekly: sync data -> predict -> evaluate -> notify -> publish (push)
-# daily : sync results -> evaluate -> notify (grading summary)
+# weekly: sync data -> refresh history + features -> predict -> evaluate -> notify -> publish (push)
+# daily : sync fixtures+results -> evaluate -> notify (grading summary)
+#
+# Model retraining (train_ensemble.py) is intentionally NOT part of this script —
+# it stays a manual, roughly monthly step run at the developer's discretion.
 
 param(
     [ValidateSet("weekly", "daily")]
@@ -36,12 +39,18 @@ function Invoke-Py {
 try {
     Write-Host "== Augo scheduled run ($Mode) ==" -ForegroundColor Cyan
     if ($Mode -eq "daily") {
-        Invoke-Py @("sync.py", "results", "--days", "2")
+        # sync.py all (not just results) so a missed weekly run self-heals the
+        # next morning instead of leaving the upcoming GW out of fixtures.csv.
+        Invoke-Py @("sync.py", "all")
         Invoke-Py @("evaluate.py", "--json")
         Invoke-Py @("notify.py", "--results")
         Invoke-Py @("publish.py", "--push")   # push results/eval to GitHub raw so the deployed app updates
     } else {
         Invoke-Py @("sync.py", "all")
+        # Re-download the season history so ELO/rolling stats fold in the
+        # finished GW, then rebuild the features served at inference time.
+        Invoke-Py @("data_pipeline.py")
+        Invoke-Py @("feature_engineering.py")
         Invoke-Py @("run_pipeline.py")
         Invoke-Py @("evaluate.py", "--json")
         Invoke-Py @("notify.py")

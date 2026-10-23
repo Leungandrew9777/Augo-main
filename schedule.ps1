@@ -34,7 +34,11 @@ $actionArgs = @{
 
 # WakeToRun: bring the PC out of sleep to run the task. StartWhenAvailable: run
 # as soon as the machine is back if the scheduled time was missed (e.g. was off).
-$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
+# AllowStartIfOnBatteries/DontStopIfGoingOnBatteries: laptops otherwise silently
+# skip Friday runs while unplugged — the cause of the missed GW8 fixture sync.
+$settings = New-ScheduledTaskSettingsSet -WakeToRun -StartWhenAvailable `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
 
 if ($DryRun) {
     Write-Host "Would register:" -ForegroundColor Cyan
@@ -47,13 +51,13 @@ if ($DryRun) {
 Register-ScheduledTask -TaskName "AugoDaily" -Force -TaskPath "\Augo" `
     -Action (New-ScheduledTaskAction -Execute "powershell.exe" -Argument ($actionArgs.Daily -join " ")) `
     -Trigger (New-ScheduledTaskTrigger -Daily -At $DailyAt) `
-    -Settings $settings -Description "Augo: sync results + grading summary"
+    -Settings $settings -Description "Augo: sync fixtures + results + grading summary"
 Write-Host "Registered AugoDaily @ $DailyAt"
 
 Register-ScheduledTask -TaskName "AugoWeekly" -Force -TaskPath "\Augo" `
     -Action (New-ScheduledTaskAction -Execute "powershell.exe" -Argument ($actionArgs.Weekly -join " ")) `
     -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Friday -At $WeeklyAt) `
-    -Settings $settings -Description "Augo: sync fixtures, run predictions, notify, publish"
+    -Settings $settings -Description "Augo: sync data, rebuild features, run predictions, notify, publish"
 Write-Host "Registered AugoWeekly @ $WeeklyAt (Friday)"
 
 Write-Host "Verify with:  Get-ScheduledTask -TaskPath '\Augo'"

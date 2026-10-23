@@ -1,9 +1,12 @@
 name: Augo automation
 
 # Runs the Augo pipeline in the cloud so it keeps working when your PC is off.
-#   weekly  : sync fixtures+results -> predict -> notify   (Friday 17:00 Asia/HK)
-#   daily   : sync results -> evaluate -> notify           (09:00 Asia/HK)
+#   weekly  : sync fixtures+results -> rebuild history/features -> predict -> notify   (Friday 17:00 Asia/HK)
+#   daily   : sync fixtures+results -> evaluate -> notify                               (09:00 Asia/HK)
 # Times are UTC on GitHub; Asia/Hong_Kong = UTC+8.
+#
+# Model retraining (train_ensemble.py) is deliberately NOT run here — it stays a
+# manual, roughly monthly step on the local machine.
 #
 # Publishing to the deployed app's data repo is handled locally by the
 # scheduler (`publish.py --push`), so this workflow no longer does it.
@@ -67,17 +70,31 @@ jobs:
           fi
           echo "Resolved mode: ${{ steps.mode.outputs.mode }}"
 
-      - name: Daily — sync results + grade
+      - name: Daily — sync fixtures+results + grade
         if: steps.mode.outputs.mode == 'daily'
         run: |
-          python sync.py results --days 2
+          # sync.py all (not just results) so a missed weekly run self-heals the
+          # next morning instead of leaving the upcoming GW out of fixtures.csv.
+          python sync.py all
           python evaluate.py --json
           python notify.py --results
 
-      - name: Weekly — sync + predict + notify
+      - name: Weekly — sync + rebuild features + predict + notify
         if: steps.mode.outputs.mode == 'weekly'
         run: |
           python sync.py all
+          # Re-download the season history so ELO/rolling stats fold in the
+          # finished GW, then rebuild the features served at inference time.
+          # If the download fails, keep the committed feature history so
+          # run_pipeline still has a usable ELO file.
+          python data_pipeline.py || echo "data_pipeline failed — keeping committed features"
+          rows=$(($(wc -l < premier_league_historical_clean.csv) - 1))
+          if [ "$rows" -gt 3000 ]; then
+            python feature_engineering.py
+          else
+            echo "data_pipeline produced only $rows rows — keeping committed feature history"
+            git checkout -- premier_league_historical_clean.csv 2>/dev/null || true
+          fi
           python run_pipeline.py
           python evaluate.py --json
           python notify.py
@@ -86,8 +103,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          # predictions_history/ is gitignored; force-add so archives persist between CI runs
-          git add -f predictions_history predictions_cache.json results.csv evaluation_report.json
+          # predictions_history/ is gitignored; force-add so archives persist between CI runs.
+          # fixtures.csv is committed too so results can be mapped to gameweeks on later runs.
+          git add -f predictions_history predictions_cache.json results.csv evaluation_report.json fixtures.csv
           git commit -m "update Augo data (ci)" --allow-empty || echo "no changes to commit"
           git push
 
