@@ -92,12 +92,13 @@ jobs:
           python data_pipeline.py || echo "data_pipeline failed — keeping committed features"
           rows=$(($(wc -l < premier_league_historical_clean.csv) - 1))
           if [ "$rows" -gt 3000 ]; then
+            python european_data.py || echo "european_data failed — keeping committed P2 data"
             python feature_engineering.py
           else
             echo "data_pipeline produced only $rows rows — keeping committed feature history"
             git checkout -- premier_league_historical_clean.csv 2>/dev/null || true
           fi
-          python data_quality.py --history --artifacts
+          python data_quality.py --history --artifacts --europe
           python run_pipeline.py
           python evaluate.py --json
           python notify.py

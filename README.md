@@ -22,8 +22,9 @@ WEEKLY (each matchday — automated by scheduled.ps1 / GitHub Actions):
   # 2. re-download history; rebuild rolling form, ELO, H2H features and the
   #    serving snapshot (team_state.json), then check the artifacts
   python data_pipeline.py
+  python european_data.py          # top-5 + UEFA results, cross-league Elo (P2)
   python feature_engineering.py
-  python data_quality.py --history --artifacts
+  python data_quality.py --history --artifacts --europe
   # 3. score the upcoming GW
   python run_pipeline.py [--gw N]
   #   -> predictions_cache.json
@@ -53,6 +54,9 @@ python sync.py all
 # 2. re-download + clean all seasons (now includes the finished GW)
 python data_pipeline.py
 #    -> premier_league_historical_clean.csv (with Understat xG)
+
+# 2b. refresh the top-5/UEFA results + cross-league Elo (candidate features)
+python european_data.py
 
 # 3. rebuild rolling form, strength-of-schedule ELO, H2H features + serving state
 python feature_engineering.py
@@ -119,6 +123,41 @@ Notes:
   when you want the model updated. Publishing to the deployed app still happens
   via `python publish.py --push`.
 
+## European data & candidate signals (P2)
+
+`european_data.py` builds a free, reproducible cross-league dataset:
+
+- **Top-5 domestic** (openfootball football.json): EPL, La Liga, Bundesliga,
+  Serie A, Ligue 1, 2013/14 -> current.
+- **UEFA competitions** (openfootball): UCL 2013/14+, UEL/UECL 2021/22-2024/25
+  where published (2026/27 UEFA data is not published yet).
+- Outputs: `european_results.csv`, `european_elo_history.csv`,
+  `european_elo_current.csv`, and `european_features.csv` (cross-league Elo +
+  UEFA rest features for every PL match).
+
+ClubElo's CSV API is currently down/behind auth, so the cross-league Elo is
+computed here. You can still supply ClubElo ratings manually (dated history is
+best; an undated file is treated as a current snapshot):
+
+```bash
+python european_data.py --import-elo path/to/clubelo.csv   # columns: team,elo[,date]
+# -> external_elo.csv (validated, canonical team names)
+```
+
+Notes:
+
+- `FootballELO.margin_multiplier` now updates ratings after draws (the old
+  formula returned 0 for a draw, silently freezing ELO).
+- **Feature policy:** the P2 candidates are merged into
+  `premier_league_with_elo_best.csv` but are **not** in `MODEL_FEATURE_COLS`.
+  The rolling-origin ablation (5 seasons + current, market-anchored blend)
+  showed no material improvement: base log-loss 0.9953 (baseline) vs 0.9978
+  (+euroelo) and 0.9950 (+UEFA rest); the blend stayed at 0.966 (vs market
+  0.963). They remain available for future work but do not enter the model
+  until they beat the baseline.
+- The raw download cache lives in `data/external/raw/` (gitignored); the
+  derived CSVs above are tracked.
+
 ## File map
 
 ### Code
@@ -138,6 +177,7 @@ Notes:
 | `rounds.py` | Date-based gameweek clustering/renumbering, shared by sync and validation. |
 | `market.py` | De-vigged bookmaker probabilities and the out-of-fold market/DC blend. |
 | `dixon_coles.py` | Time-weighted Dixon-Coles ratings (goals/xG) -> scoreline-based H/D/A probabilities. |
+| `european_data.py` | Top-5 + UEFA results, cross-league Elo, UEFA rest features, external ClubElo import. |
 | `backtest.py` | Season rolling-origin backtest with market/base-rate baselines, bootstrap CIs, per-class reliability. |
 | `data_quality.py` | Hard data-quality gate: fixtures/results, history coverage, artifact freshness, prediction smoke test. |
 | `tests/` | Pytest suite: rounds, mixed-date parsing, data quality, team state, end-to-end serving. |
@@ -160,6 +200,11 @@ Notes:
 | `market_blend.pkl` | Output of `train_ensemble.py`: out-of-fold `[model, Dixon-Coles, market]` stacker + vector calibrator. |
 | `dixon_coles_model.pkl` | Output of `train_ensemble.py`: time-weighted attack/defence ratings used by the blend. |
 | `backtest_report.json` | Output of `backtest.py --json` (rolling-origin metrics/baselines/CIs). |
+| `european_results.csv` | P2 top-5 + UEFA match results (canonical team keys). |
+| `european_elo_history.csv` | Per-team cross-league Elo after each match (as-of queries). |
+| `european_elo_current.csv` | Latest cross-league Elo per team. |
+| `european_features.csv` | Candidate P2 features for PL matches (cross-league Elo + UEFA rest). |
+| `external_elo.csv` | Optional canonicalised ClubElo ratings imported by `european_data.py --import-elo`. |
 | `predictions_cache.json` | Latest predictions written by `run_pipeline.py`; consumed by `app.py`. |
 | `predictions_history/GW{N}.json` | Per-gameweek snapshot. Power the History tab. |
 | `user_picks.json` | Persisted user picks per gameweek (`{gw: {match_idx: "H"/"D"/"A"}}`). |

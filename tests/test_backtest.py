@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
 
-from backtest import _bootstrap_mean_ci, season_start_year, season_test_folds
+from backtest import _bootstrap_mean_ci, feature_columns, season_start_year, season_test_folds
+from feature_engineering import EURO_ELO_COLS, EURO_REST_COLS
+from features import MODEL_FEATURE_COLS
 
 
 def test_season_start_year():
@@ -32,3 +34,20 @@ def test_bootstrap_ci_contains_mean():
     low, high = _bootstrap_mean_ci(values)
     assert low == 0.25
     assert high == 0.25
+
+
+def test_feature_columns_groups():
+    columns = MODEL_FEATURE_COLS + EURO_ELO_COLS + EURO_REST_COLS
+    frame = pd.DataFrame(columns=columns)
+
+    baseline = feature_columns("baseline", frame)
+    assert baseline == MODEL_FEATURE_COLS
+
+    euroelo = feature_columns("euroelo", frame)
+    assert set(euroelo) == set(MODEL_FEATURE_COLS) | set(EURO_ELO_COLS)
+
+    rest = feature_columns("eurorest", frame)
+    assert set(rest) == set(MODEL_FEATURE_COLS) | set(EURO_REST_COLS)
+
+    combined = feature_columns("all", frame)
+    assert set(combined) == set(columns)

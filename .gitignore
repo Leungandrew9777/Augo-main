@@ -12,3 +12,6 @@ predictions_history/
 !predictions_history/.gitkeep
 user_picks.json
 bankroll.json
+
+# External data download caches (regenerable; derived CSVs are tracked)
+data/external/raw/

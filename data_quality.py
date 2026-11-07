@@ -40,6 +40,9 @@ STATE_FILE = os.getenv("AUGO_STATE_FILE") or os.path.join(APP_DIR, "team_state.j
 MODEL_FILE = os.getenv("AUGO_MODEL_FILE") or os.path.join(APP_DIR, "xgboost_premier_league_model.pkl")
 MARKET_BLEND_FILE = os.getenv("AUGO_MARKET_BLEND_FILE") or os.path.join(APP_DIR, "market_blend.pkl")
 DIXON_COLES_FILE = os.getenv("AUGO_DIXON_COLES_FILE") or os.path.join(APP_DIR, "dixon_coles_model.pkl")
+EURO_RESULTS_FILE = os.getenv("AUGO_EURO_RESULTS_FILE") or os.path.join(APP_DIR, "european_results.csv")
+EURO_FEATURES_FILE = os.getenv("AUGO_EURO_FEATURES_FILE") or os.path.join(APP_DIR, "european_features.csv")
+EXTERNAL_ELO_FILE = os.getenv("AUGO_EXTERNAL_ELO_FILE") or os.path.join(APP_DIR, "external_elo.csv")
 
 HISTORY_SEASONS = [
     "2627", "2526", "2425", "2324", "2223", "2122", "2021",
@@ -349,6 +352,74 @@ def validate_artifacts(*, today=None) -> Issues:
     return errors, warnings
 
 
+def validate_european_data(*, today=None) -> Issues:
+    """Validate the P2 European results/features + optional external Elo file."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    today = today or dates.today_uk()
+
+    results, res_errors = _read_csv(
+        EURO_RESULTS_FILE,
+        ["date", "competition", "season", "home_team", "away_team", "home_goals", "away_goals"],
+        "european results",
+    )
+    if results is None:
+        warnings.extend(res_errors + ["run european_data.py to build it"])
+    else:
+        work = results.copy()
+        work["_date"] = dates.parse_series(work["date"])
+        if work["_date"].isna().any():
+            errors.append(f"european results: {int(work['_date'].isna().sum())} unparseable dates")
+        work = work.dropna(subset=["_date"])
+        dupes = work[work.duplicated(subset=["_date", "home_team", "away_team"], keep=False)]
+        if not dupes.empty:
+            errors.append(f"european results: {len(dupes)} duplicate match(es)")
+        for col in ("home_goals", "away_goals"):
+            goals = pd.to_numeric(work[col], errors="coerce")
+            if goals.isna().any() or ((goals < 0) | (goals > 15)).any():
+                errors.append(f"european results: invalid {col}")
+        if not work["competition"].astype(str).str.contains("EPL").any():
+            errors.append("european results: EPL competition missing")
+        if (work["_date"].max().date() if not work.empty else today) < today - pd.Timedelta(days=200):
+            warnings.append("european results look stale — rerun european_data.py")
+
+    features, feat_errors = _read_csv(
+        EURO_FEATURES_FILE,
+        ["date", "home_team", "away_team", "euroelo_diff"],
+        "european features",
+    )
+    if features is None:
+        warnings.extend(feat_errors + ["run european_data.py to build it"])
+    else:
+        if len(features) < 1000:
+            warnings.append(f"european features: only {len(features)} rows")
+        coverage = float(features["euroelo_diff"].notna().mean()) if len(features) else 0.0
+        if coverage < 0.9:
+            warnings.append(f"european features: euroelo_diff coverage {coverage:.1%}")
+        for col in ("euroelo_home", "euroelo_away"):
+            values = pd.to_numeric(features[col], errors="coerce").dropna()
+            if not values.empty and ((values < 500) | (values > 3000)).any():
+                errors.append(f"european features: implausible {col}")
+        diffs = pd.to_numeric(features["euroelo_diff"], errors="coerce").dropna()
+        if not diffs.empty and float(diffs.abs().max()) > 1500:
+            errors.append("european features: implausible euroelo_diff")
+
+    if os.path.exists(EXTERNAL_ELO_FILE):
+        external, ext_errors = _read_csv(EXTERNAL_ELO_FILE, ["team", "elo"], "external Elo")
+        if external is None:
+            errors.extend(ext_errors)
+        else:
+            elo = pd.to_numeric(external["elo"], errors="coerce")
+            if elo.isna().any() or ((elo < 1000) | (elo > 2600)).any():
+                errors.append("external Elo: invalid rating(s)")
+            if "date" in external.columns:
+                bad_dates = external["date"].map(dates.iso_date).isna().sum()
+                if bad_dates:
+                    errors.append(f"external Elo: {int(bad_dates)} invalid date(s)")
+
+    return errors, warnings
+
+
 def _smoke_predict(fixtures: pd.DataFrame, today) -> str:
     from features import (  # local imports keep the gate startup light
         MODEL_FEATURE_COLS,
@@ -429,9 +500,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data", action="store_true", help="validate fixtures.csv + results.csv")
     parser.add_argument("--history", action="store_true", help="validate the cleaned match history")
     parser.add_argument("--artifacts", action="store_true", help="validate ELO/team-state/model + smoke test")
+    parser.add_argument("--europe", action="store_true", help="validate European results/features/external Elo")
     args = parser.parse_args(argv)
 
-    run_all = not (args.data or args.history or args.artifacts)
+    run_all = not (args.data or args.history or args.artifacts or args.europe)
     failed = False
 
     if run_all or args.data:
@@ -460,6 +532,11 @@ def main(argv: list[str] | None = None) -> int:
     if run_all or args.artifacts:
         errors, warnings = validate_artifacts()
         _report("artifacts", errors, warnings)
+        failed |= bool(errors)
+
+    if run_all or args.europe:
+        errors, warnings = validate_european_data()
+        _report("european data", errors, warnings)
         failed |= bool(errors)
 
     print("data quality gate: FAILED" if failed else "data quality gate: passed")

@@ -12,6 +12,21 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CLEAN_FILE = os.path.join(APP_DIR, "premier_league_historical_clean.csv")
 FEATURES_FILE = os.path.join(APP_DIR, "premier_league_with_elo_best.csv")
 STATE_FILE = os.path.join(APP_DIR, "team_state.json")
+EURO_FEATURES_FILE = os.path.join(APP_DIR, "european_features.csv")
+
+# Candidate P2 features: merged into the feature frame but deliberately NOT in
+# MODEL_FEATURE_COLS until the rolling-origin ablation justifies them.
+EURO_ELO_COLS = [
+    "euroelo_home", "euroelo_away", "euroelo_diff",
+    "euroelo_home_games", "euroelo_away_games",
+]
+EURO_REST_COLS = [
+    "euro_days_since", "euro_days_until",
+    "euro_played_midweek", "euro_next_midweek",
+    "euro_away_days_since", "euro_away_days_until",
+    "euro_away_played_midweek", "euro_away_next_midweek",
+]
+EURO_FEATURE_COLS = EURO_ELO_COLS + EURO_REST_COLS
 
 WINDOW = 5
 STATE_DUMMY_TEAM = "__augo_state__"
@@ -152,7 +167,11 @@ class FootballELO:
         return 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / 400.0))
 
     def margin_multiplier(self, goal_diff: int) -> float:
-        return np.log(abs(goal_diff) + 1) * (2.2 / 2.2)   # simplified FiveThirtyEight style
+        # Draws must still update ratings; the goal margin only scales decisive
+        # results. (Returning 0 for draws silently froze ELO after every draw.)
+        if goal_diff == 0:
+            return 1.0
+        return float(np.log(abs(goal_diff) + 1))
 
     def update(self, home: str, away: str, home_goals: int, away_goals: int):
         r_home = self.get_rating(home) + self.home_advantage
@@ -266,6 +285,40 @@ def add_h2h_features(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     return df
 
 
+def merge_european_features(featured: pd.DataFrame) -> pd.DataFrame:
+    """Left-join the P2 candidate features without changing rows/old columns."""
+    if not os.path.exists(EURO_FEATURES_FILE):
+        return featured
+    ext = pd.read_csv(EURO_FEATURES_FILE)
+    required = {"date", "home_team", "away_team"}
+    if not required.issubset(ext.columns):
+        print("WARN: european_features.csv missing key columns - skipped")
+        return featured
+
+    ext = ext.copy()
+    ext["_key_date"] = parse_series(ext["date"]).dt.strftime("%Y-%m-%d")
+    ext = ext.rename(columns={"home_team": "HomeTeam", "away_team": "AwayTeam"})
+    cols = [c for c in EURO_FEATURE_COLS if c in ext.columns]
+    if not cols:
+        return featured
+
+    work = featured.copy()
+    work["_key_date"] = parse_series(work["Date"]).dt.strftime("%Y-%m-%d")
+    before = len(work)
+    merged = work.merge(
+        ext[["_key_date", "HomeTeam", "AwayTeam"] + cols],
+        on=["_key_date", "HomeTeam", "AwayTeam"],
+        how="left",
+        validate="one_to_one",
+    )
+    if len(merged) != before:
+        raise RuntimeError("European feature merge changed the row count")
+    merged = merged.drop(columns=["_key_date"])
+    coverage = {c: int(merged[c].notna().sum()) for c in cols}
+    print(f"OK: merged European candidate features {coverage}")
+    return merged
+
+
 def build_team_state(df: pd.DataFrame, elo: "FootballELO", *, window: int = WINDOW) -> dict:
     """Snapshot every team as of AFTER its last completed match.
 
@@ -354,6 +407,9 @@ if __name__ == "__main__":
     featured = add_odds_features(featured)
     print("Adding H2H features (slow, O(n^2))...")
     featured = add_h2h_features(featured, n=5)
+
+    print("Merging European candidate features (P2)...")
+    featured = merge_european_features(featured)
     featured.to_csv(FEATURES_FILE, index=False)
     print(f"OK: STEP 2 COMPLETE - Saved {len(featured):,} matches -> {FEATURES_FILE}")
 

@@ -26,6 +26,7 @@ import pandas as pd
 from sklearn.metrics import log_loss
 from sklearn.model_selection import TimeSeriesSplit
 
+from feature_engineering import EURO_ELO_COLS, EURO_REST_COLS
 from features import MODEL_FEATURE_COLS
 from market import MARKET_COLS, fit_market_blend, market_probs_from_odds
 from metrics import (
@@ -227,6 +228,23 @@ def _fit_predict_fold(
     }
 
 
+FEATURE_SETS = ("baseline", "euroelo", "eurorest", "all")
+
+
+def feature_columns(feature_set: str, df: pd.DataFrame) -> list[str]:
+    """Baseline model features plus an optional P2 candidate group."""
+    base = [c for c in MODEL_FEATURE_COLS if c in df.columns]
+    extras: list[str] = []
+    if feature_set in ("euroelo", "all"):
+        extras += EURO_ELO_COLS
+    if feature_set in ("eurorest", "all"):
+        extras += EURO_REST_COLS
+    missing = [c for c in extras if c not in df.columns]
+    if missing:
+        print(f"WARN: feature set '{feature_set}' columns missing: {missing}")
+    return base + [c for c in extras if c in df.columns]
+
+
 def _saved_params() -> dict:
     from train_ensemble import BEST_PARAMS_FILE, DEFAULT_PARAMS
 
@@ -242,15 +260,17 @@ def run_backtest(
     n_seasons: int = 5,
     seeds: tuple[int, ...] = (42,),
     tune_trials: int = 0,
+    feature_set: str = "baseline",
 ) -> dict[str, Any]:
     from train_ensemble import load_training_frame
 
     df = df if df is not None else load_training_frame()
-    feature_cols = [c for c in MODEL_FEATURE_COLS if c in df.columns]
+    feature_cols = feature_columns(feature_set, df)
     params = _saved_params()
     folds = season_test_folds(df, n_seasons=n_seasons)
     if not folds:
         raise SystemExit("backtest: no season folds available")
+    print(f"Feature set '{feature_set}': {len(feature_cols)} features")
 
     results: list[dict[str, Any]] = []
     for season, train_df, test_df in folds:
@@ -331,11 +351,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seeds", default="42", help="comma-separated seeds, e.g. 42,7,2026")
     parser.add_argument("--tune", action="store_true", help="nested hyperparameter search per fold")
     parser.add_argument("--trials", type=int, default=4, help="nested tuning trials per fold")
+    parser.add_argument(
+        "--feature-set", choices=FEATURE_SETS, default="baseline",
+        help="baseline, euroelo, eurorest or all (P2 ablation)",
+    )
     parser.add_argument("--json", action="store_true", help="write backtest_report.json")
     args = parser.parse_args(argv)
 
     seeds = tuple(int(s) for s in args.seeds.split(",") if s.strip())
-    report = run_backtest(n_seasons=args.seasons, seeds=seeds, tune_trials=args.trials if args.tune else 0)
+    report = run_backtest(
+        n_seasons=args.seasons,
+        seeds=seeds,
+        tune_trials=args.trials if args.tune else 0,
+        feature_set=args.feature_set,
+    )
 
     if args.json:
         with open(REPORT_FILE, "w", encoding="utf-8") as f:
