@@ -87,24 +87,4 @@ def test_rest_features_midweek_flags():
     assert nxt == 0
 
 
-def test_import_external_elo_canonicalises(tmp_path, monkeypatch):
-    source = tmp_path / "clubelo.csv"
-    source.write_text(
-        "team,date,elo\nMan City,2026-11-01,1910\nArsenal,2026-11-01,1950\n",
-        encoding="utf-8",
-    )
-    output = tmp_path / "external_elo.csv"
-    monkeypatch.setattr(ed, "EXTERNAL_ELO_FILE", str(output))
 
-    df = ed.import_external_elo(str(source))
-    assert set(df["team"]) == {"Man City", "Arsenal"}
-    assert df["date"].tolist() == ["2026-11-01", "2026-11-01"]
-    assert output.exists()
-
-
-def test_import_external_elo_rejects_bad_schema(tmp_path, monkeypatch):
-    source = tmp_path / "bad.csv"
-    source.write_text("club,rating\nArsenal,1900\n", encoding="utf-8")
-    monkeypatch.setattr(ed, "EXTERNAL_ELO_FILE", str(tmp_path / "out.csv"))
-    with pytest.raises(SystemExit):
-        ed.import_external_elo(str(source))

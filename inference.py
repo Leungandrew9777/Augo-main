@@ -15,6 +15,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from alo import attach_alo
 from display import format_odds_display
 from features import (
     MODEL_FEATURE_COLS,
@@ -345,6 +346,8 @@ def predict_matches(upcoming: pd.DataFrame, model, df_elo: pd.DataFrame) -> pd.D
         ):
             disp[col] = ""
 
+    # Reference-only European ranking (Alo): deliberately not a model feature.
+    upcoming = attach_alo(upcoming)
     return _append_columns(upcoming, disp)
 
 

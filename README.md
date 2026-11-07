@@ -136,13 +136,22 @@ Notes:
   UEFA rest features for every PL match).
 
 ClubElo's CSV API is currently down/behind auth, so the cross-league Elo is
-computed here. You can still supply ClubElo ratings manually (dated history is
-best; an undated file is treated as a current snapshot):
+computed here. External European rankings are called **Alo** and are imported
+from a ClubAlo/ClubElo export:
 
 ```bash
-python european_data.py --import-elo path/to/clubelo.csv   # columns: team,elo[,date]
-# -> external_elo.csv (validated, canonical team names)
+python alo.py --import path/to/ClubAloRankings.csv
+# expected columns: Club Ranking, Club Name, Club ALO, Country
+# -> alo_rankings.csv (validated, PL names canonicalised, thousands separators stripped)
 ```
+
+Naming — deliberately kept separate:
+
+| name | meaning | used by |
+| --- | --- | --- |
+| `elo_*` | our Premier League sequential ELO | model features |
+| `euroelo_*` | our computed cross-league Elo (top-5 + UEFA results) | candidate features |
+| `alo_*` | imported ClubAlo European ranking (current snapshot) | serving/reference only — **not** a model feature |
 
 Notes:
 
@@ -177,7 +186,8 @@ Notes:
 | `rounds.py` | Date-based gameweek clustering/renumbering, shared by sync and validation. |
 | `market.py` | De-vigged bookmaker probabilities and the out-of-fold market/DC blend. |
 | `dixon_coles.py` | Time-weighted Dixon-Coles ratings (goals/xG) -> scoreline-based H/D/A probabilities. |
-| `european_data.py` | Top-5 + UEFA results, cross-league Elo, UEFA rest features, external ClubElo import. |
+| `european_data.py` | Top-5 + UEFA results, cross-league Elo, UEFA rest features. |
+| `alo.py` | Imports/validates ClubAlo European rankings (`alo_rankings.csv`) and attaches serving-only `alo_*` fields. |
 | `backtest.py` | Season rolling-origin backtest with market/base-rate baselines, bootstrap CIs, per-class reliability. |
 | `data_quality.py` | Hard data-quality gate: fixtures/results, history coverage, artifact freshness, prediction smoke test. |
 | `tests/` | Pytest suite: rounds, mixed-date parsing, data quality, team state, end-to-end serving. |
@@ -204,7 +214,7 @@ Notes:
 | `european_elo_history.csv` | Per-team cross-league Elo after each match (as-of queries). |
 | `european_elo_current.csv` | Latest cross-league Elo per team. |
 | `european_features.csv` | Candidate P2 features for PL matches (cross-league Elo + UEFA rest). |
-| `external_elo.csv` | Optional canonicalised ClubElo ratings imported by `european_data.py --import-elo`. |
+| `alo_rankings.csv` | Imported ClubAlo European rankings (current snapshot, reference only; not a model feature). |
 | `predictions_cache.json` | Latest predictions written by `run_pipeline.py`; consumed by `app.py`. |
 | `predictions_history/GW{N}.json` | Per-gameweek snapshot. Power the History tab. |
 | `user_picks.json` | Persisted user picks per gameweek (`{gw: {match_idx: "H"/"D"/"A"}}`). |

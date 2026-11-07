@@ -42,7 +42,7 @@ MARKET_BLEND_FILE = os.getenv("AUGO_MARKET_BLEND_FILE") or os.path.join(APP_DIR,
 DIXON_COLES_FILE = os.getenv("AUGO_DIXON_COLES_FILE") or os.path.join(APP_DIR, "dixon_coles_model.pkl")
 EURO_RESULTS_FILE = os.getenv("AUGO_EURO_RESULTS_FILE") or os.path.join(APP_DIR, "european_results.csv")
 EURO_FEATURES_FILE = os.getenv("AUGO_EURO_FEATURES_FILE") or os.path.join(APP_DIR, "european_features.csv")
-EXTERNAL_ELO_FILE = os.getenv("AUGO_EXTERNAL_ELO_FILE") or os.path.join(APP_DIR, "external_elo.csv")
+ALO_FILE = os.getenv("AUGO_ALO_FILE") or os.path.join(APP_DIR, "alo_rankings.csv")
 
 HISTORY_SEASONS = [
     "2627", "2526", "2425", "2324", "2223", "2122", "2021",
@@ -404,18 +404,30 @@ def validate_european_data(*, today=None) -> Issues:
         if not diffs.empty and float(diffs.abs().max()) > 1500:
             errors.append("european features: implausible euroelo_diff")
 
-    if os.path.exists(EXTERNAL_ELO_FILE):
-        external, ext_errors = _read_csv(EXTERNAL_ELO_FILE, ["team", "elo"], "external Elo")
-        if external is None:
-            errors.extend(ext_errors)
+    fixtures, fixture_errors = _read_csv(FIXTURES_FILE, ["home_team", "away_team"], "fixtures.csv")
+    if fixtures is None:
+        warnings.extend(fixture_errors)
+
+    if not os.path.exists(ALO_FILE):
+        warnings.append("Alo rankings missing: alo_rankings.csv - run python alo.py --import <export.csv>")
+    else:
+        alo, alo_errors = _read_csv(ALO_FILE, ["team", "alo"], "Alo rankings")
+        if alo is None:
+            errors.extend(alo_errors)
         else:
-            elo = pd.to_numeric(external["elo"], errors="coerce")
-            if elo.isna().any() or ((elo < 1000) | (elo > 2600)).any():
-                errors.append("external Elo: invalid rating(s)")
-            if "date" in external.columns:
-                bad_dates = external["date"].map(dates.iso_date).isna().sum()
-                if bad_dates:
-                    errors.append(f"external Elo: {int(bad_dates)} invalid date(s)")
+            values = pd.to_numeric(alo["alo"], errors="coerce")
+            if values.isna().any() or ((values < 1000) | (values > 2600)).any():
+                errors.append("Alo rankings: invalid rating(s)")
+            if alo["team"].astype(str).duplicated().any():
+                errors.append("Alo rankings: duplicate team(s)")
+            if fixtures is not None:
+                known = set(alo["team"].astype(str))
+                fixture_teams = {
+                    str(v) for col in ("home_team", "away_team") for v in fixtures[col].dropna()
+                }
+                missing = sorted(t for t in fixture_teams if t not in known)
+                if missing:
+                    warnings.append(f"Alo rankings: missing fixture team(s) {missing} - update the Alo export")
 
     return errors, warnings
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""european_data.py — top-5 European results + cross-league Elo + external Elo.
+"""european_data.py — top-5 European results + cross-league Elo.
 
 Data sources (free):
   * top-5 domestic leagues: openfootball football.json
@@ -10,23 +10,17 @@ Outputs (new files only; existing fixtures/results/history are never touched):
   * european_elo_history.csv   per-team rating after each match (as-of queries)
   * european_elo_current.csv   latest rating per team
   * european_features.csv      cross-league Elo + UEFA rest features for PL matches
-  * external_elo.csv           canonicalised ratings imported from your ClubElo file
 
 The cross-league Elo is our own sequential rating over the combined dataset
 (top-5 domestic + UEFA cups), so it is fully historical and backtestable.
-ClubElo ratings can be imported periodically (the CSV API is currently down):
 
-    # file columns: team,elo  (optionally date=YYYY-MM-DD for history)
-    python european_data.py --import-elo path/to/clubelo.csv
-
-They are used only as a fallback for teams with no history in our dataset and
-as an optional feature candidate; the model only keeps them if a rolling-origin
-backtest shows an improvement.
+External European rankings are called **Alo** and live in ``alo.py``
+(``python alo.py --import path/to/ClubAloRankings.csv``). They are deliberately
+never mixed with the PL ELO (``elo_*``) or this computed cross-league Elo.
 
 Usage:
     python european_data.py            # rebuild results + Elo + PL features
     python european_data.py --report   # print coverage / validation report only
-    python european_data.py --import-elo data/external/clubelo_ratings.csv
 """
 
 from __future__ import annotations
@@ -52,7 +46,6 @@ RESULTS_FILE = os.path.join(APP_DIR, "european_results.csv")
 ELO_HISTORY_FILE = os.path.join(APP_DIR, "european_elo_history.csv")
 ELO_CURRENT_FILE = os.path.join(APP_DIR, "european_elo_current.csv")
 FEATURES_FILE = os.path.join(APP_DIR, "european_features.csv")
-EXTERNAL_ELO_FILE = os.path.join(APP_DIR, "external_elo.csv")
 CLEAN_FILE = os.path.join(APP_DIR, "premier_league_historical_clean.csv")
 
 OPENFOOTBALL_JSON = "https://raw.githubusercontent.com/openfootball/football.json/master"
@@ -106,15 +99,6 @@ EURO_TO_CLEAN: dict[str, str] = {
     "West Bromwich Albion": "West Brom", "West Bromwich Albion FC": "West Brom",
     "West Ham United": "West Ham", "West Ham United FC": "West Ham",
     "Wolverhampton Wanderers": "Wolves", "Wolverhampton Wanderers FC": "Wolves",
-}
-
-# ClubElo / common spellings -> our clean names (PL only; others stay as-is).
-CLUBELO_TO_CLEAN: dict[str, str] = {
-    "Man City": "Man City", "Man United": "Man United", "Newcastle": "Newcastle",
-    "Nott'm Forest": "Nott'm Forest", "Nottingham Forest": "Nott'm Forest",
-    "Tottenham": "Tottenham", "West Ham": "West Ham", "Wolves": "Wolves",
-    "Brighton": "Brighton", "Bournemouth": "Bournemouth", "Leeds": "Leeds",
-    "Coventry": "Coventry", "Hull": "Hull", "Ipswich": "Ipswich",
 }
 
 MONTHS = {m: i for i, m in enumerate(
@@ -178,11 +162,6 @@ def canonical_team(name: str) -> str:
     key = re.sub(r"^(?:\d+\.\s*)?(FC|AFC|CF|AC|AS|SS|SSC|SC|SV|VfB|VfL|TSG|FSV|BSC)\s+", "", base, flags=re.I)
     key = unicodedata.normalize("NFC", re.sub(r"\s+", " ", key).strip())
     return key
-
-
-def clubelo_key(name: str) -> str:
-    raw = str(name).strip()
-    return CLUBELO_TO_CLEAN.get(raw, raw)
 
 
 def _strip_country(name: str) -> str:
@@ -477,49 +456,6 @@ def build_pl_features(results: pd.DataFrame, history: pd.DataFrame) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
-# ── external Elo ingestion ──────────────────────────────────────────────────
-
-def import_external_elo(path: str) -> pd.DataFrame:
-    """Validate a user-supplied ClubElo CSV and write canonical external_elo.csv.
-
-    Accepted columns (case-insensitive): team/club, elo, optional date.
-    Dates make the rows usable for historical features; without dates the file
-    is treated as a current snapshot (serving-only).
-    """
-    raw = pd.read_csv(path)
-    columns = {c.lower().strip(): c for c in raw.columns}
-    team_col = columns.get("team") or columns.get("club")
-    elo_col = columns.get("elo")
-    date_col = columns.get("date")
-    if not team_col or not elo_col:
-        raise SystemExit("external Elo: need columns 'team' (or 'club') and 'elo'")
-
-    work = pd.DataFrame({
-        "team": raw[team_col].astype(str).map(clubelo_key).str.strip(),
-        "elo": pd.to_numeric(raw[elo_col], errors="coerce"),
-    })
-    if date_col:
-        work["date"] = [dates.iso_date(v) for v in raw[date_col]]
-    else:
-        work["date"] = str(dates.today_uk())
-
-    bad_elo = work["elo"].isna() | (work["elo"] < 1000) | (work["elo"] > 2600)
-    bad_date = work["date"].isna()
-    if bad_elo.any():
-        print(f"WARN: dropping {int(bad_elo.sum())} row(s) with invalid Elo")
-    if bad_date.any():
-        print(f"WARN: dropping {int(bad_date.sum())} row(s) with invalid dates")
-    work = work[~bad_elo & ~bad_date].drop_duplicates(subset=["team", "date"])
-    if work.empty:
-        raise SystemExit("external Elo: no usable rows")
-
-    work = work.sort_values(["team", "date"]).reset_index(drop=True)
-    work.to_csv(EXTERNAL_ELO_FILE, index=False)
-    print(f"OK: {len(work)} canonical rating(s) -> {EXTERNAL_ELO_FILE}")
-    print(f"   teams: {work['team'].nunique()} | dated: {date_col is not None}")
-    return work
-
-
 # ── report / CLI ────────────────────────────────────────────────────────────
 
 def report(results: pd.DataFrame, history: pd.DataFrame, features: pd.DataFrame) -> None:
@@ -541,13 +477,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="European results + cross-league Elo")
     parser.add_argument("--refresh", action="store_true", help="ignore raw download cache")
     parser.add_argument("--report", action="store_true", help="print coverage report only")
-    parser.add_argument("--import-elo", metavar="PATH", help="validate a ClubElo CSV and write external_elo.csv")
     parser.add_argument("--seasons", nargs="*", help="override seasons (default: HISTORY_SEASONS)")
     args = parser.parse_args(argv)
-
-    if args.import_elo:
-        import_external_elo(args.import_elo)
-        return 0
 
     results = build_results(args.seasons, refresh=args.refresh)
     errors, warnings = validate_results(results)
