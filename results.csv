@@ -1,4 +1,5 @@
 date,gameweek,home_team,away_team,home_goals,away_goals
+1/11/2026,9,Liverpool,Arsenal,0,1
 10/10/2026,6,Arsenal,Leeds United,2,1
 10/10/2026,6,Aston Villa,Brentford,2,2
 10/10/2026,6,Chelsea,Bournemouth,5,1
@@ -35,7 +36,26 @@ date,gameweek,home_team,away_team,home_goals,away_goals
 19/9/2026,5,Everton,Ipswich Town,1,0
 19/9/2026,5,Newcastle,Hull City,2,1
 19/9/2026,5,Nottingham Forest,Coventry City,0,1
+2/11/2026,9,Newcastle,Everton,0,1
 20/9/2026,5,Bournemouth,Liverpool,0,1
 20/9/2026,5,Leeds United,Crystal Palace,0,0
 20/9/2026,5,Manchester City,Sunderland,5,3
 20/9/2026,5,Fulham,Manchester United,1,1
+23/10/2026,8,Ipswich Town,Nottingham Forest,1,1
+24/10/2026,8,Aston Villa,Manchester City,2,1
+24/10/2026,8,Arsenal,Everton,2,0
+24/10/2026,8,Coventry City,Fulham,0,1
+24/10/2026,8,Chelsea,Tottenham Hotspur,0,2
+25/10/2026,8,Manchester United,Bournemouth,0,3
+25/10/2026,8,Hull City,Brentford,1,1
+25/10/2026,8,Liverpool,Brighton & Hove Albion,2,0
+25/10/2026,8,Crystal Palace,Newcastle,0,2
+25/10/2026,8,Sunderland,Leeds United,0,0
+31/10/2026,9,Chelsea,Manchester United,2,0
+31/10/2026,9,Bournemouth,Leeds United,2,0
+31/10/2026,9,Brentford,Nottingham Forest,2,0
+31/10/2026,9,Manchester City,Brighton & Hove Albion,0,1
+31/10/2026,9,Coventry City,Sunderland,3,1
+31/10/2026,9,Hull City,Ipswich Town,2,2
+31/10/2026,9,Tottenham Hotspur,Crystal Palace,2,0
+31/10/2026,9,Aston Villa,Fulham,1,1

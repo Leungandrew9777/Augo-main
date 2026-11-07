@@ -15,11 +15,14 @@ ONE-TIME (or after retraining):
   python train_ensemble.py       -> xgboost_premier_league_model.pkl
 
 WEEKLY (each matchday — automated by scheduled.ps1 / GitHub Actions):
-  # 1. refresh fixtures.csv + results.csv
+  # 1. refresh fixtures.csv + results.csv, then check them
   python sync.py all
-  # 2. re-download history, then rebuild rolling form, ELO, H2H features
+  python data_quality.py --data
+  # 2. re-download history; rebuild rolling form, ELO, H2H features and the
+  #    serving snapshot (team_state.json), then check the artifacts
   python data_pipeline.py
   python feature_engineering.py
+  python data_quality.py --history --artifacts
   # 3. score the upcoming GW
   python run_pipeline.py [--gw N]
   #   -> predictions_cache.json
@@ -49,9 +52,10 @@ python sync.py all
 python data_pipeline.py
 #    -> premier_league_historical_clean.csv (with Understat xG)
 
-# 3. rebuild rolling form, strength-of-schedule ELO, H2H features
+# 3. rebuild rolling form, strength-of-schedule ELO, H2H features + serving state
 python feature_engineering.py
 #    -> premier_league_with_elo_best.csv
+#    -> team_state.json   (post-last-match ELO + rolling features used at inference)
 
 # 4. retrain the stacked ensemble + goal/HT/corner models
 python train_ensemble.py            # reuses saved best_params.json if present
@@ -59,14 +63,16 @@ python train_ensemble.py --tune     # optional: walk-forward random search first
 #    -> xgboost_premier_league_model.pkl, goal_model_{home,away}.pkl,
 #       goal_model_ht_{home,away}.pkl, corner_model_{home,away}.pkl
 
-# 5. re-score the upcoming GW so the cache/UI uses the new models
+# 5. validate the rebuilt artifacts, then re-score the upcoming GW
+python data_quality.py --history --artifacts
 python run_pipeline.py [--gw N]
 ```
 
 Notes:
 
-- `data_pipeline.py` pulls every season listed at the bottom of the file
-  (currently 2627 → 1314) from football-data.co.uk. If the current season's CSV
+- `data_pipeline.py` pulls every season in `data_quality.HISTORY_SEASONS`
+  (currently 2627 → 1314) from football-data.co.uk and refuses to write the
+  cleaned file if any season is missing or truncated. If the current season's CSV
   is not published yet (early-season 503), run
   `python bootstrap_season.py [--season 2627]` to append the finished matches
   from Understat (goals + real xG; missing shots/corners/odds are median-filled)
@@ -75,6 +81,12 @@ Notes:
   (`TimeSeriesSplit`), so no future matches leak into training, and prints
   accuracy / log-loss / Brier / ECE. `--tune` writes the winning parameters to
   `best_params.json` for subsequent runs.
+- `data_quality.py` is a hard gate: it validates fixture/result consistency
+  (rounds, duplicates, result↔fixture gameweeks), historical season coverage,
+  artifact freshness and runs an end-to-end prediction smoke test. The
+  scheduled jobs abort on errors and alert via Telegram.
+- `python -m pytest` runs the test suite (`requirements-dev.txt`); CI runs it
+  on Python 3.14 with the pinned dependencies before the data-quality gate.
 - Retrain only after the GW's results are final. Existing
   `predictions_history/GW{N}.json` snapshots are never overwritten, so history,
   grading, and bankroll stay intact; re-running `run_pipeline.py` only updates
@@ -100,6 +112,10 @@ Notes:
 | `app.py` | Reflex UI (Predictor, Insights, Custom predictor, History). |
 | `league.py` | Premier League team list + badge URLs shared by the pipeline and UI. |
 | `metrics.py` | Shared Brier / expected-calibration-error metrics for training and evaluation. |
+| `dates.py` | Shared date parsing for the mixed `DD/MM/YYYY` + `DD/MM/YY` Football-Data files. |
+| `rounds.py` | Date-based gameweek clustering/renumbering, shared by sync and validation. |
+| `data_quality.py` | Hard data-quality gate: fixtures/results, history coverage, artifact freshness, prediction smoke test. |
+| `tests/` | Pytest suite: rounds, mixed-date parsing, data quality, team state, end-to-end serving. |
 | `team_aliases.py` | Maps team-name variants between fixtures, ELO history, results, and the odds API. |
 | `display.py` | Shared odds formatting so `run_pipeline.py` and `app.py` render identical display strings. |
 | `bankroll.py` | Virtual-wallet strategy registry (`WALLETS`), ledger builders and portfolio/PnL summaries. |
@@ -113,7 +129,8 @@ Notes:
 | `fixtures.csv` | Source of truth for upcoming gameweek fixtures. Edit weekly. |
 | `results.csv` | Ground-truth scores (`gameweek, home_team, away_team, home_goals, away_goals`). Drives auto-grading on the History tab. |
 | `premier_league_historical_clean.csv` | Output of `data_pipeline.py`. |
-| `premier_league_with_elo_best.csv` | Output of `feature_engineering.py`. |
+| `premier_league_with_elo_best.csv` | Output of `feature_engineering.py` (historical training features). |
+| `team_state.json` | Output of `feature_engineering.py`: post-last-match ELO ratings and per-team/venue rolling features served at inference time. |
 | `xgboost_premier_league_model.pkl` | Output of `train_ensemble.py`. |
 | `predictions_cache.json` | Latest predictions written by `run_pipeline.py`; consumed by `app.py`. |
 | `predictions_history/GW{N}.json` | Per-gameweek snapshot. Power the History tab. |
@@ -121,7 +138,7 @@ Notes:
 
 ### Config / docs
 
-`requirements.txt`, `.env`, `.gitignore`, `README.md`.
+`requirements.txt`, `requirements-dev.txt`, `pytest.ini`, `.env`, `.gitignore`, `.github/workflows/`, `README.md`.
 
 ## Required env vars
 

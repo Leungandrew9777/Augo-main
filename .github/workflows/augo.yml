@@ -51,7 +51,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install dependencies
         run: |
@@ -76,6 +76,7 @@ jobs:
           # sync.py all (not just results) so a missed weekly run self-heals the
           # next morning instead of leaving the upcoming GW out of fixtures.csv.
           python sync.py all
+          python data_quality.py --data
           python evaluate.py --json
           python notify.py --results
 
@@ -83,6 +84,7 @@ jobs:
         if: steps.mode.outputs.mode == 'weekly'
         run: |
           python sync.py all
+          python data_quality.py --data
           # Re-download the season history so ELO/rolling stats fold in the
           # finished GW, then rebuild the features served at inference time.
           # If the download fails, keep the committed feature history so
@@ -95,6 +97,7 @@ jobs:
             echo "data_pipeline produced only $rows rows — keeping committed feature history"
             git checkout -- premier_league_historical_clean.csv 2>/dev/null || true
           fi
+          python data_quality.py --history --artifacts
           python run_pipeline.py
           python evaluate.py --json
           python notify.py

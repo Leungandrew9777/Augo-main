@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-publish.py — publish cache/results/evaluation to GitHub so the deployed
+publish.py - publish cache/results/evaluation to GitHub so the deployed
 Reflex Cloud app reads fresh data via raw URLs (see data_urls.py).
 
 Flow
@@ -90,19 +90,19 @@ def main() -> None:
             json.dump(urls, f, indent=2)
         print(f"Wrote {URLS_FILE} -> {urls}")
     else:
-        print("⚠️  No AUGO_RAW_BASE set and no git origin found — remote_data_urls.json not updated.")
+        print("WARN:  No AUGO_RAW_BASE set and no git origin found - remote_data_urls.json not updated.")
 
     if args.push:
         if not _git_ok(DATA_REPO):
-            print("❌  Not a git repo — run:  git init && git remote add origin <url>")
+            print("ERROR:  Not a git repo - run:  git init && git remote add origin <url>")
             return
         _run(["git", "add", "-A"], cwd=DATA_REPO)
         _run(["git", "commit", "-m", "update Augo data", "--allow-empty"], cwd=DATA_REPO)
         r = _run(["git", "push"], cwd=DATA_REPO)
         if r.returncode == 0:
-            print("✓ Pushed to origin.")
+            print("OK: Pushed to origin.")
         else:
-            print(f"❌  Push failed: {r.stderr.strip() or r.stdout.strip()}")
+            print(f"ERROR:  Push failed: {r.stderr.strip() or r.stdout.strip()}")
 
 
 if __name__ == "__main__":

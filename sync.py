@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sync.py — keep fixtures.csv and results.csv in sync with live data
+sync.py - keep fixtures.csv and results.csv in sync with live data
 (The Odds API, same key as run_pipeline.py).
 
 Usage:
@@ -13,11 +13,13 @@ Notes
 * Fixtures: existing (date, home, away) rows are kept; matching team pairings
   get their date refreshed (postponements); brand-new events are grouped into
   date clusters and assigned the next GW number(s) after the current max
-  (use ``--gw N`` to start a new season at GW N).
+  (use ``--gw N`` to start a new season at GW N). After merging, rounds are
+  renumbered from the fixture dates so late-announced matches (e.g. a Monday
+  fixture) join their real gameweek instead of creating a new one.
 * Results: only matches whose (date/team) pairing is found in fixtures.csv are
   written, so gameweeks are always correct; rows already present (matched by
-  date first, then gameweek + pairing) are updated in place (e.g. goal
-  corrections) without cross-season collisions.
+  date first, then gameweek + pairing) are updated in place (goal corrections
+  and gameweek renumbering) without cross-season collisions.
 * Override output paths with AUGO_FIXTURES_FILE / AUGO_RESULTS_FILE.
 """
 
@@ -31,6 +33,8 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
+from dates import iso_date, parse_series
+from rounds import renumber_rounds
 from team_aliases import badge_lookup_key, fixture_lookup_key
 
 load_dotenv()
@@ -65,12 +69,12 @@ def _write_fmt(dt_str: str) -> str:
     return f"{ts.day}/{ts.month}/{ts.year}"
 
 
-# ── API ──────────────────────────────────────────────────────────────────────
+# -- API ----------------------------------------------------------------------
 
 def fetch_upcoming_events(days: int = 10) -> pd.DataFrame:
     key = _api_key()
     if key is None:
-        print("⚠️  ODDS_API_KEY not set — cannot fetch fixtures.")
+        print("WARN:  ODDS_API_KEY not set - cannot fetch fixtures.")
         return pd.DataFrame()
     now = datetime.now(timezone.utc)
     params = {
@@ -84,7 +88,7 @@ def fetch_upcoming_events(days: int = 10) -> pd.DataFrame:
         resp = requests.get(f"{BASE}/{SPORT}/odds", params=params, timeout=20)
         resp.raise_for_status()
     except Exception as exc:
-        print(f"⚠️  Odds API fixtures request failed: {exc}")
+        print(f"WARN:  Odds API fixtures request failed: {exc}")
         return pd.DataFrame()
     rows = [
         {
@@ -101,13 +105,13 @@ def fetch_upcoming_events(days: int = 10) -> pd.DataFrame:
 def fetch_finished_scores(days: int = 3) -> pd.DataFrame:
     key = _api_key()
     if key is None:
-        print("⚠️  ODDS_API_KEY not set — cannot fetch results.")
+        print("WARN:  ODDS_API_KEY not set - cannot fetch results.")
         return pd.DataFrame()
     try:
         resp = requests.get(f"{BASE}/{SPORT}/scores", params={"apiKey": key, "daysFrom": days}, timeout=20)
         resp.raise_for_status()
     except Exception as exc:
-        print(f"⚠️  Odds API scores request failed: {exc}")
+        print(f"WARN:  Odds API scores request failed: {exc}")
         return pd.DataFrame()
     rows = []
     for ev in resp.json():
@@ -130,7 +134,7 @@ def fetch_finished_scores(days: int = 3) -> pd.DataFrame:
     return out.drop_duplicates(subset=["date", "home_team", "away_team"])
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# -- Fixtures ------------------------------------------------------------------
 
 def _load_fixtures() -> pd.DataFrame:
     if not os.path.exists(FIXTURES_FILE):
@@ -140,61 +144,63 @@ def _load_fixtures() -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
     df = df[FIXTURE_COLS].copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
+    df["date"] = parse_series(df["date"]).dt.strftime("%Y-%m-%d")
     df["gameweek"] = pd.to_numeric(df["gameweek"], errors="coerce")
     return df.dropna(subset=["date", "home_team", "away_team"]).reset_index(drop=True)
 
 
 def sync_fixtures(days: int = 10, gw_override: int | None = None) -> None:
     events = fetch_upcoming_events(days)
-    if events.empty:
-        print("   No upcoming events returned — fixtures.csv unchanged.")
-        return
-
     existing = _load_fixtures()
     rows = existing.to_dict("records")
     max_gw = int(existing["gameweek"].max()) if len(existing) and existing["gameweek"].notna().any() else 0
 
     added = 0
     updated = 0
-    new_events: list[dict] = []
-    for ev in events.to_dict("records"):
-        h, a = str(ev["home_team"]).strip(), str(ev["away_team"]).strip()
-        exact = [r for r in rows if str(r["home_team"]).strip() == h and str(r["away_team"]).strip() == a and str(r["date"]) == str(ev["date"])]
-        if exact:
-            continue
-        # Single *future* pairing -> refresh its date (postponement/rearrange).
-        # Past rows are never touched, so historical gameweeks stay intact.
-        today = _iso(datetime.now().isoformat())
-        pair = [r for r in rows if str(r["home_team"]).strip() == h and str(r["away_team"]).strip() == a]
-        if len(pair) == 1 and pd.notna(pair[0].get("gameweek")) and str(pair[0]["date"]) >= today:
-            pair[0]["date"] = str(ev["date"])
-            updated += 1
-        else:
-            new_events.append(ev)
+    if events.empty:
+        print("   No upcoming events returned - keeping fixtures; checking round numbering.")
+    else:
+        new_events: list[dict] = []
+        for ev in events.to_dict("records"):
+            h, a = str(ev["home_team"]).strip(), str(ev["away_team"]).strip()
+            exact = [r for r in rows if str(r["home_team"]).strip() == h and str(r["away_team"]).strip() == a and str(r["date"]) == str(ev["date"])]
+            if exact:
+                continue
+            # Single *future* pairing -> refresh its date (postponement/rearrange).
+            # Past rows are never touched, so historical gameweeks stay intact.
+            today = _iso(datetime.now().isoformat())
+            pair = [r for r in rows if str(r["home_team"]).strip() == h and str(r["away_team"]).strip() == a]
+            if len(pair) == 1 and pd.notna(pair[0].get("gameweek")) and str(pair[0]["date"]) >= today:
+                pair[0]["date"] = str(ev["date"])
+                updated += 1
+            else:
+                new_events.append(ev)
 
-    if new_events:
-        base = int(gw_override) if gw_override is not None else max_gw + 1
-        clusters: list[list[dict]] = []
-        cur: list[dict] = []
-        prev: datetime | None = None
-        for ev in sorted(new_events, key=lambda x: x["date"]):
-            d = datetime.strptime(str(ev["date"]), "%Y-%m-%d")
-            if prev is not None and (d - prev).days > 1:
+        if new_events:
+            base = int(gw_override) if gw_override is not None else max_gw + 1
+            clusters: list[list[dict]] = []
+            cur: list[dict] = []
+            prev: datetime | None = None
+            for ev in sorted(new_events, key=lambda x: x["date"]):
+                d = datetime.strptime(str(ev["date"]), "%Y-%m-%d")
+                if prev is not None and (d - prev).days > 1:
+                    clusters.append(cur)
+                    cur = []
+                cur.append(ev)
+                prev = d
+            if cur:
                 clusters.append(cur)
-                cur = []
-            cur.append(ev)
-            prev = d
-        if cur:
-            clusters.append(cur)
-        for i, cluster in enumerate(clusters):
-            gw = base + i
-            for ev in cluster:
-                rows.append({"gameweek": gw, "date": str(ev["date"]),
-                             "home_team": str(ev["home_team"]).strip(), "away_team": str(ev["away_team"]).strip()})
-                added += 1
-        print(f"   Assigned GW {base}..{base + len(clusters) - 1} to {added} new fixture(s)"
-              f" (override with --gw N for a new season).")
+            for i, cluster in enumerate(clusters):
+                gw = base + i
+                for ev in cluster:
+                    rows.append({"gameweek": gw, "date": str(ev["date"]),
+                                 "home_team": str(ev["home_team"]).strip(), "away_team": str(ev["away_team"]).strip()})
+                    added += 1
+            print(f"   Assigned GW {base}..{base + len(clusters) - 1} to {added} new fixture(s)"
+                  f" (override with --gw N for a new season).")
+
+    # Final pass: make the gameweek numbers follow the official round dates.
+    rows = renumber_rounds(rows)
 
     out = pd.DataFrame(rows, columns=FIXTURE_COLS)
     out = out.drop_duplicates(subset=["home_team", "away_team", "date"])
@@ -204,7 +210,7 @@ def sync_fixtures(days: int = 10, gw_override: int | None = None) -> None:
     print(f"fixtures: {added} added, {updated} date-updated -> {len(out)} total ({FIXTURES_FILE})")
 
 
-# ── Results ───────────────────────────────────────────────────────────────────
+# -- Results -------------------------------------------------------------------
 
 def _load_results() -> pd.DataFrame:
     if not os.path.exists(RESULTS_FILE):
@@ -219,14 +225,14 @@ def _load_results() -> pd.DataFrame:
 def sync_results(days: int = 3) -> None:
     scores = fetch_finished_scores(days)
     if scores.empty:
-        print("   No completed matches returned — results.csv unchanged.")
-        return
+        print("   No completed matches returned - reconciling stored results only.")
 
     fixtures = _load_fixtures()
     if fixtures.empty:
-        print("   fixtures.csv is empty — cannot map results to gameweeks.")
+        print("   fixtures.csv is empty - cannot map results to gameweeks.")
         return
-    fixtures["date"] = pd.to_datetime(fixtures["date"], errors="coerce", dayfirst=True).dt.strftime("%Y-%m-%d")
+    # _load_fixtures already normalises to ISO; dayfirst here would swap day/month.
+    fixtures["date"] = pd.to_datetime(fixtures["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     date_gw = {
         (str(r["date"]), str(r["home_team"]).strip(), str(r["away_team"]).strip()): int(r["gameweek"])
         for _, r in fixtures.iterrows() if pd.notna(r["gameweek"])
@@ -239,14 +245,31 @@ def sync_results(days: int = 3) -> None:
     results = _load_results()
 
     def _norm_date(value: object) -> str:
-        ts = pd.to_datetime(value, errors="coerce", dayfirst=True, format="mixed")
-        return str(ts.date()) if pd.notna(ts) else str(value).strip()
+        # ISO values (API scores) and DD/MM/YYYY values (results.csv) both
+        # normalise through the shared parser.
+        return iso_date(value) or str(value).strip()
 
     def _as_int(value: object) -> int | None:
         try:
             return int(float(value))
         except (TypeError, ValueError):
             return None
+
+    # Fixtures may have been renumbered since a result was stored; re-map every
+    # stored row to the gameweek its fixture now carries.
+    remapped = 0
+    for i, r in results.iterrows():
+        match_date = _norm_date(r["date"])
+        rh, ra = fixture_lookup_key(str(r["home_team"])), fixture_lookup_key(str(r["away_team"]))
+        gw = date_gw.get((match_date, rh, ra))
+        if gw is None:
+            gws = pair_gw.get((rh, ra), [])
+            gw = gws[0] if len(gws) == 1 else None
+        if gw is not None and _as_int(r["gameweek"]) != gw:
+            results.loc[i, "gameweek"] = gw
+            remapped += 1
+    if remapped:
+        print(f"   Re-mapped {remapped} stored result(s) to the corrected gameweek.")
 
     # Key existing rows by (date, home, away) first, then (gw, home, away), so a
     # goal correction finds the right row and identical pairings in a later
@@ -302,7 +325,8 @@ def sync_results(days: int = 3) -> None:
         if idx is not None:
             old = results.iloc[idx]
             if (_as_int(old["home_goals"]) != row["home_goals"]
-                    or _as_int(old["away_goals"]) != row["away_goals"]):
+                    or _as_int(old["away_goals"]) != row["away_goals"]
+                    or _as_int(old["gameweek"]) != row["gameweek"]):
                 for col, val in row.items():
                     results.loc[idx, col] = val
                 existing_by_date[key_date] = idx
@@ -317,12 +341,12 @@ def sync_results(days: int = 3) -> None:
             added += 1
 
     if skipped:
-        print(f"   ⚠️  Skipped {len(skipped)} match(es) not in fixtures.csv: {', '.join(skipped[:5])}"
-              + (" …" if len(skipped) > 5 else ""))
+        print(f"   WARN:  Skipped {len(skipped)} match(es) not in fixtures.csv: {', '.join(skipped[:5])}"
+              + (" ..." if len(skipped) > 5 else ""))
     out = results.drop_duplicates(subset=["date", "home_team", "away_team"])
     out = out.sort_values(["date", "gameweek"])
     out.to_csv(RESULTS_FILE, index=False)
-    print(f"results: {added} added, {updated} updated -> {len(out)} total ({RESULTS_FILE})")
+    print(f"results: {added} added, {updated} updated, {remapped} re-mapped -> {len(out)} total ({RESULTS_FILE})")
 
 
 def main() -> None:

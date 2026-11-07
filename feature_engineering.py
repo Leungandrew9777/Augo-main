@@ -1,6 +1,20 @@
 # feature_engineering.py
+import json
+import os
+from datetime import datetime
+
 import pandas as pd
 import numpy as np
+
+from dates import parse_series
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CLEAN_FILE = os.path.join(APP_DIR, "premier_league_historical_clean.csv")
+FEATURES_FILE = os.path.join(APP_DIR, "premier_league_with_elo_best.csv")
+STATE_FILE = os.path.join(APP_DIR, "team_state.json")
+
+WINDOW = 5
+STATE_DUMMY_TEAM = "__augo_state__"
 
 # League-average ELO used to normalise strength-of-schedule adjustments.
 LEAGUE_AVG_ELO = 1500.0
@@ -186,7 +200,7 @@ def add_odds_features(df: pd.DataFrame) -> pd.DataFrame:
 def add_fatigue_features(df: pd.DataFrame) -> pd.DataFrame:
     """Single chronological pass: rest days per team, advantage flag."""
     df = df.copy()
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True, format="mixed")
+    df["Date"] = parse_series(df["Date"])
     df = df.sort_values("Date")
     last_match: dict[str, pd.Timestamp] = {}
     home_rest = []
@@ -217,7 +231,7 @@ def add_h2h_features(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     rolling window per pair reproduces the original per-row ``tail(n)`` scan.
     """
     df = df.copy()
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True, format="mixed")
+    df["Date"] = parse_series(df["Date"])
     df = df.sort_values("Date").reset_index(drop=True)
 
     home = df["HomeTeam"].astype(str)
@@ -252,21 +266,101 @@ def add_h2h_features(df: pd.DataFrame, n: int = 5) -> pd.DataFrame:
     return df
 
 
+def build_team_state(df: pd.DataFrame, elo: "FootballELO", *, window: int = WINDOW) -> dict:
+    """Snapshot every team as of AFTER its last completed match.
+
+    Training rows hold rolling stats over the five matches *before* that match
+    (``shift(1).rolling``), so serving must shift the same window one match
+    forward. We append one synthetic "next match" row per team and venue and
+    let :meth:`FeatureEngineer.compute_team_stats` fill its rolling values; the
+    synthetic row's own (NaN) stats never enter the average because the window
+    is shifted. The result is the exact feature vector a real next fixture
+    would receive, plus the post-history ELO ratings.
+    """
+    generated_at = datetime.now().isoformat(timespec="seconds")
+    if df.empty:
+        return {
+            "generated_at": generated_at, "window": int(window),
+            "home_advantage": float(elo.home_advantage),
+            "last_match_date": None, "ratings": {}, "teams": {},
+        }
+
+    work = df.copy()
+    work["Date"] = parse_series(work["Date"])
+    work = work.dropna(subset=["Date"])
+    for col in ("home_xg", "away_xg"):
+        if col not in work.columns:
+            work[col] = np.nan
+
+    teams = sorted({str(t) for t in pd.concat([work["HomeTeam"], work["AwayTeam"]]).unique()})
+    ratings = {team: float(elo.get_rating(team)) for team in teams}
+    state_date = work["Date"].max() + pd.Timedelta(days=1)
+
+    synthetic: list[dict] = []
+    for team in teams:
+        base = {
+            "Date": state_date, "FTHG": np.nan, "FTAG": np.nan,
+            "HS": np.nan, "AS": np.nan, "HST": np.nan, "AST": np.nan,
+            "HC": np.nan, "AC": np.nan, "HF": np.nan, "AF": np.nan,
+            "home_xg": np.nan, "away_xg": np.nan,
+        }
+        synthetic.append({
+            **base, "HomeTeam": team, "AwayTeam": STATE_DUMMY_TEAM,
+            "elo_home_rating": ratings[team], "elo_away_rating": 1500.0,
+        })
+        synthetic.append({
+            **base, "HomeTeam": STATE_DUMMY_TEAM, "AwayTeam": team,
+            "elo_home_rating": 1500.0, "elo_away_rating": ratings[team],
+        })
+
+    combined = pd.concat([work, pd.DataFrame(synthetic)], ignore_index=True)
+    stats = FeatureEngineer(window=window).compute_team_stats(combined)
+    suffix_cols = [c for c in stats.columns if c.startswith("avg_")] + ["Form"]
+    state_rows = stats[(stats["Team"].isin(teams)) & (stats["Date"] == state_date)]
+
+    team_state: dict[str, dict[str, dict[str, float | None]]] = {}
+    for _, row in state_rows.iterrows():
+        venue = "home" if int(row["IsHome"]) == 1 else "away"
+        team_state.setdefault(str(row["Team"]), {})[venue] = {
+            col: (None if pd.isna(row[col]) else float(row[col])) for col in suffix_cols
+        }
+
+    return {
+        "generated_at": generated_at,
+        "window": int(window),
+        "home_advantage": float(elo.home_advantage),
+        "last_match_date": str(work["Date"].max().date()),
+        "ratings": ratings,
+        "teams": team_state,
+    }
+
+
 # ====================== RUN THIS ======================
 if __name__ == "__main__":
     print("Loading cleaned data...")
-    df = pd.read_csv("premier_league_historical_clean.csv")
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=True, format="mixed")
+    df = pd.read_csv(CLEAN_FILE)
+    df["Date"] = parse_series(df["Date"])
     df = df.dropna(subset=["Date"])
+
     print("Computing ELO ratings (needed for strength-of-schedule)...")
     elo = FootballELO(k=32, home_advantage=65)
     df = elo.compute_elo_features(df)
+
     print("Building home/away-split, strength-adjusted rolling stats...")
-    engineer = FeatureEngineer(window=5)
+    engineer = FeatureEngineer(window=WINDOW)
     featured = engineer.build_match_features(df)
+
     print("Adding bookmaker odds features...")
     featured = add_odds_features(featured)
     print("Adding H2H features (slow, O(n^2))...")
     featured = add_h2h_features(featured, n=5)
-    featured.to_csv("premier_league_with_elo_best.csv", index=False)
-    print(f"OK: STEP 2 COMPLETE - Saved {len(featured):,} matches -> premier_league_with_elo_best.csv")
+    featured.to_csv(FEATURES_FILE, index=False)
+    print(f"OK: STEP 2 COMPLETE - Saved {len(featured):,} matches -> {FEATURES_FILE}")
+
+    print("Snapshotting team state as of the last completed match...")
+    state = build_team_state(df, elo, window=WINDOW)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    print(f"OK: team state -> {STATE_FILE} "
+          f"(last match {state['last_match_date']}, {len(state['teams'])} teams, "
+          f"{len(state['ratings'])} ratings)")

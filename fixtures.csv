@@ -36,6 +36,7 @@ gameweek,date,home_team,away_team
 5,19/9/2026,Everton,Ipswich
 5,19/9/2026,Newcastle,Hull
 5,19/9/2026,Nott'm Forest,Coventry
+9,2/11/2026,Newcastle,Everton
 5,20/9/2026,Bournemouth,Liverpool
 5,20/9/2026,Leeds,Crystal Palace
 5,20/9/2026,Man City,Sunderland
@@ -58,3 +59,13 @@ gameweek,date,home_team,away_team
 9,31/10/2026,Hull,Ipswich
 9,31/10/2026,Tottenham,Crystal Palace
 9,31/10/2026,Aston Villa,Fulham
+10,6/11/2026,Everton,Coventry
+10,7/11/2026,Leeds,Tottenham
+10,7/11/2026,Arsenal,Hull
+10,7/11/2026,Fulham,Newcastle
+10,7/11/2026,Nott'm Forest,Man City
+10,8/11/2026,Ipswich,Bournemouth
+10,8/11/2026,Brighton,Brentford
+10,8/11/2026,Sunderland,Chelsea
+10,8/11/2026,Crystal Palace,Liverpool
+10,8/11/2026,Man United,Aston Villa

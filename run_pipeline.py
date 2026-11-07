@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-run_pipeline.py  —  Augo prediction pipeline
+run_pipeline.py  -  Augo prediction pipeline
 Run ONCE before each gameweek. Output: predictions_cache.json
 Usage:
     python run_pipeline.py              # auto-detects next gameweek
@@ -35,6 +35,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_FILE     = os.path.join(APP_DIR, "predictions_cache.json")
 FIXTURES_FILE  = os.path.join(APP_DIR, "fixtures.csv")
 ELO_FILE       = os.path.join(APP_DIR, "premier_league_with_elo_best.csv")
+STATE_FILE     = os.path.join(APP_DIR, "team_state.json")
 MODEL_FILE     = os.path.join(APP_DIR, "xgboost_premier_league_model.pkl")
 GOAL_HOME_FILE = os.path.join(APP_DIR, "goal_model_home.pkl")
 GOAL_AWAY_FILE = os.path.join(APP_DIR, "goal_model_away.pkl")
@@ -57,7 +58,7 @@ def fetch_odds_from_api(fixtures_df: pd.DataFrame) -> pd.DataFrame:
 
     api_key = os.environ.get("ODDS_API_KEY", "").strip()
     if not api_key or api_key == "your_key_here":
-        print("⚠️  ODDS_API_KEY not set — skipping live bookmaker odds.")
+        print("WARN:  ODDS_API_KEY not set - skipping live bookmaker odds.")
         return fixtures_df
 
     params = {
@@ -75,7 +76,7 @@ def fetch_odds_from_api(fixtures_df: pd.DataFrame) -> pd.DataFrame:
         params["commenceTimeTo"] = latest.strftime("%Y-%m-%dT23:59:59Z")
 
     try:
-        print("Fetching bookmaker odds from The Odds API …")
+        print("Fetching bookmaker odds from The Odds API ...")
         resp = requests.get(ODDS_API_URL, params=params, timeout=15)
         remaining = resp.headers.get("x-requests-remaining", "?")
         used = resp.headers.get("x-requests-used", "?")
@@ -83,7 +84,7 @@ def fetch_odds_from_api(fixtures_df: pd.DataFrame) -> pd.DataFrame:
         resp.raise_for_status()
         events = resp.json()
     except Exception as exc:
-        print(f"⚠️  Odds API request failed: {exc}")
+        print(f"WARN:  Odds API request failed: {exc}")
         return fixtures_df
 
     if not events:
@@ -158,9 +159,9 @@ def launch_ui():
 
     exe = shutil.which("reflex")
     if not exe:
-        print("⚠️  reflex not found on PATH — run `reflex run` manually.")
+        print("WARN:  reflex not found on PATH - run `reflex run` manually.")
         return
-    print("   Launching Reflex UI (reflex run) …")
+    print("   Launching Reflex UI (reflex run) ...")
     subprocess.Popen([exe, "run"])
 
 
@@ -176,12 +177,13 @@ def main():
         (GOAL_HOME_FILE, "Run train_ensemble.py first."),
         (GOAL_AWAY_FILE, "Run train_ensemble.py first."),
         (ELO_FILE,      "Run feature_engineering.py first."),
+        (STATE_FILE,    "Run feature_engineering.py first (writes team_state.json)."),
         (FIXTURES_FILE, "fixtures.csv must have: matchweek, date, home_team, away_team"),
     ]:
         if not os.path.exists(path):
-            sys.exit(f"❌  {path} not found — {hint}")
+            sys.exit(f"ERROR:  {path} not found - {hint}")
 
-    print("Loading model and ELO data …")
+    print("Loading model and ELO data ...")
     model  = joblib.load(MODEL_FILE)
     goal_model_home = joblib.load(GOAL_HOME_FILE)
     goal_model_away = joblib.load(GOAL_AWAY_FILE)
@@ -214,10 +216,10 @@ def main():
 
     if args.gw is not None:
         if gw_col is None:
-            sys.exit("❌  --gw specified but no matchweek/gameweek column found.")
+            sys.exit("ERROR:  --gw specified but no matchweek/gameweek column found.")
         selected = df_fix[df_fix[gw_col] == args.gw].sort_values("date")
         if selected.empty:
-            sys.exit(f"❌  No fixtures found for matchweek {args.gw}.")
+            sys.exit(f"ERROR:  No fixtures found for matchweek {args.gw}.")
         gw_label = f"GW{args.gw}"
     elif gw_col and df_fix[gw_col].notna().any():
         if future.empty:
@@ -246,7 +248,7 @@ def main():
             if available:
                 print(f"Auto-selected gameweek: GW{int(next_gw)}")
                 print("Available gameweeks:", ", ".join(f"GW{g}" for g in available[:20]) +
-                      (" …" if len(available) > 20 else ""))
+                      (" ..." if len(available) > 20 else ""))
                 try:
                     raw = input("Enter any GW number to simulate (or press Enter to keep selected): ").strip()
                 except (EOFError, KeyboardInterrupt):
@@ -255,11 +257,11 @@ def main():
                     try:
                         gw_int = int(raw)
                         if gw_int not in available:
-                            print(f"⚠️  GW{gw_int} not found in fixtures.csv; using GW{int(next_gw)}.")
+                            print(f"WARN:  GW{gw_int} not found in fixtures.csv; using GW{int(next_gw)}.")
                         else:
                             chosen_gw = gw_int
                     except ValueError:
-                        print(f"⚠️  Invalid input; using GW{int(next_gw)}.")
+                        print(f"WARN:  Invalid input; using GW{int(next_gw)}.")
 
         # Important: select from ALL fixtures so we show the full gameweek,
         # not just matches on/after today.
@@ -276,7 +278,7 @@ def main():
     for _, row in selected.iterrows():
         for team in (row["home_team"], row["away_team"]):
             if team not in known:
-                print(f"⚠️   Unknown team '{team}' — ELO defaults to 1500")
+                print(f"WARN:   Unknown team '{team}' - ELO defaults to 1500")
 
     # Fetch live bookmaker odds (single API call) and inject B365H/D/A columns
     selected = fetch_odds_from_api(selected)
@@ -327,17 +329,17 @@ def main():
         if created:
             print(f"   Archived snapshot → {archive_path}")
         else:
-            print(f"   Archive {archive_path} already exists — kept (cache only updated).")
+            print(f"   Archive {archive_path} already exists - kept (cache only updated).")
 
-    print(f"\n{'─'*72}")
+    print(f"\n{'-'*72}")
     print(f"{'HOME':<26}  {'AWAY':<26}  H%    D%    A%   Pick")
-    print(f"{'─'*72}")
+    print(f"{'-'*72}")
     for r in records:
         print(f"{r['home_team']:<26}  {r['away_team']:<26}  "
               f"{r['prob_home']*100:4.1f}  {r['prob_draw']*100:4.1f}  "
               f"{r['prob_away']*100:4.1f}  [{r['model_pick']}]")
-    print(f"{'─'*72}")
-    print(f"\n✅  Predictions cached → {CACHE_FILE}")
+    print(f"{'-'*72}")
+    print(f"\nOK:  Predictions cached → {CACHE_FILE}")
     print(f"   Now launch:  reflex run")
 
     if args.launch:

@@ -393,12 +393,10 @@ def main() -> None:
     }
     for name, model in artifacts.items():
         joblib.dump(model, os.path.join(APP_DIR, name))
-    df.to_csv(FEATURES_FILE, index=False)
 
     print("\nSTEP 5 + 6 + 7 COMPLETE")
     for name in artifacts:
         print(f"   Saved -> {name}")
-    print(f"   Data saved   -> {os.path.basename(FEATURES_FILE)}")
     print("   run_pipeline.py and app.py will now use the new stacked ensemble.")
 
 

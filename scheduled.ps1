@@ -42,15 +42,18 @@ try {
         # sync.py all (not just results) so a missed weekly run self-heals the
         # next morning instead of leaving the upcoming GW out of fixtures.csv.
         Invoke-Py @("sync.py", "all")
+        Invoke-Py @("data_quality.py", "--data")   # hard gate: abort on bad fixtures/results
         Invoke-Py @("evaluate.py", "--json")
         Invoke-Py @("notify.py", "--results")
         Invoke-Py @("publish.py", "--push")   # push results/eval to GitHub raw so the deployed app updates
     } else {
         Invoke-Py @("sync.py", "all")
+        Invoke-Py @("data_quality.py", "--data")   # hard gate before touching history/features
         # Re-download the season history so ELO/rolling stats fold in the
         # finished GW, then rebuild the features served at inference time.
         Invoke-Py @("data_pipeline.py")
         Invoke-Py @("feature_engineering.py")
+        Invoke-Py @("data_quality.py", "--history", "--artifacts")   # gate + prediction smoke test
         Invoke-Py @("run_pipeline.py")
         Invoke-Py @("evaluate.py", "--json")
         Invoke-Py @("notify.py")

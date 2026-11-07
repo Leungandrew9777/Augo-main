@@ -1,0 +1,2 @@
+# Development / CI-only dependencies (not installed in the deployed app).
+pytest==9.1.1

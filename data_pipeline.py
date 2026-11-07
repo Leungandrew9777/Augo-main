@@ -1,10 +1,19 @@
 # data_pipeline.py
+import os
+
 import pandas as pd
 import numpy as np
 import json
 import time
 
 import requests
+
+from data_quality import HISTORY_SEASONS, validate_clean_history
+from dates import parse_series
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CLEAN_FILE = os.path.join(APP_DIR, "premier_league_historical_clean.csv")
+
 
 class FootballDataLoader:
     # NOTE: no "www." — football-data.co.uk returns 503 with www and works without.
@@ -45,10 +54,10 @@ class FootballDataLoader:
             df = df.dropna(subset=["HomeTeam", "AwayTeam", "FTR"])
             df["League"] = self.LEAGUES.get(league, league)
             df["Season"] = season
-            print(f"✓ {self.LEAGUES.get(league)} {season}: {len(df)} matches")
+            print(f"OK: {self.LEAGUES.get(league)} {season}: {len(df)} matches")
             return df
         except Exception as e:
-            print(f"⚠️  Failed to load {league}/{season}: {e}")
+            print(f"WARN: Failed to load {league}/{season}: {e}")
             return pd.DataFrame()
 
     def load_all(self) -> pd.DataFrame:
@@ -59,10 +68,10 @@ class FootballDataLoader:
                 if not df.empty:
                     frames.append(df)
         if not frames:
-            print("\n⚠️  No matches loaded from any season.")
+            print("\nWARN: No matches loaded from any season.")
             return pd.DataFrame()
         result = pd.concat(frames, ignore_index=True)
-        print(f"\n✅ Total matches loaded: {len(result):,}")
+        print(f"\nOK: Total matches loaded: {len(result):,}")
         return result
 
 
@@ -70,7 +79,7 @@ class DataCleaner:
     @staticmethod
     def clean(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+        df["Date"] = parse_series(df["Date"])
         df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
         numeric_cols = [
@@ -144,7 +153,7 @@ def fetch_understat_xg(seasons: list[str], sleep: float = 0.4) -> pd.DataFrame:
     for season in seasons:
         year = int(str(int(season))[:2]) + 2000
         if year < 2014 or year > 2026:
-            print(f"   Understat has no xG for season {season} — skipping.")
+            print(f"   Understat has no xG for season {season} - skipping.")
             continue
         try:
             # Visiting the league page establishes the session cookie the API needs.
@@ -153,7 +162,7 @@ def fetch_understat_xg(seasons: list[str], sleep: float = 0.4) -> pd.DataFrame:
             resp.raise_for_status()
             data = json.loads(resp.text)
         except Exception as exc:
-            print(f"⚠️  Understat {year} fetch failed: {exc}")
+            print(f"WARN: Understat {year} fetch failed: {exc}")
             time.sleep(sleep)
             continue
         matches = data.get("dates", [])
@@ -177,7 +186,7 @@ def fetch_understat_xg(seasons: list[str], sleep: float = 0.4) -> pd.DataFrame:
                 "away_xg": a_xg,
             })
             cnt += 1
-        print(f"✓ Understat xG {year}: {cnt} matches")
+        print(f"OK: Understat xG {year}: {cnt} matches")
         time.sleep(sleep)
     return pd.DataFrame(rows, columns=["date", "home_team", "away_team", "home_xg", "away_xg"])
 
@@ -220,24 +229,30 @@ def merge_understat_xg(clean_df: pd.DataFrame, xg_df: pd.DataFrame) -> pd.DataFr
 
 # ====================== RUN THIS ======================
 if __name__ == "__main__":
-    # Include the current season (2627) + all previous you want
-    loader = FootballDataLoader(
-        seasons=["2627", "2526", "2425", "2324", "2223", "2122", "2021", "1920", "1819", "1718", "1617", "1516", "1415", "1314"]
-    )
+    loader = FootballDataLoader(seasons=HISTORY_SEASONS)
     raw_data = loader.load_all()
+    if raw_data.empty:
+        raise SystemExit("ERROR: no matches loaded - check the football-data.co.uk connection.")
 
     clean_data = DataCleaner.clean(raw_data)
-    clean_data.to_csv("premier_league_historical_clean.csv", index=False)
 
-    print(f"✅ Saved {len(clean_data):,} cleaned matches → premier_league_historical_clean.csv")
-
-    # Attach real xG from Understat where available
+    # Attach real xG from Understat where available (best effort).
     try:
-        print("Fetching real xG from Understat …")
+        print("Fetching real xG from Understat ...")
         xg = fetch_understat_xg(loader.seasons)
         clean_data = merge_understat_xg(clean_data, xg)
-        clean_data.to_csv("premier_league_historical_clean.csv", index=False)
-        print(f"✅ Saved {len(clean_data):,} cleaned matches with xG → premier_league_historical_clean.csv")
     except Exception as exc:
-        print(f"⚠️  Understat xG merge skipped: {exc}")
-    print("Now run the feature engineering + training steps below.")
+        print(f"WARN: Understat xG merge skipped: {exc}")
+
+    # Hard gate: never write a truncated or malformed history.
+    errors, warnings = validate_clean_history(clean_data, loader.seasons)
+    for message in warnings:
+        print(f"WARN: {message}")
+    if errors:
+        for message in errors:
+            print(f"ERROR: {message}")
+        raise SystemExit("ERROR: clean history failed the data-quality gate - file not written.")
+
+    clean_data.to_csv(CLEAN_FILE, index=False)
+    print(f"OK: saved {len(clean_data):,} cleaned matches -> {CLEAN_FILE}")
+    print("Now run feature_engineering.py.")

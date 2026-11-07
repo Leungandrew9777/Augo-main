@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONIOENCODING: "utf-8"
+      AUGO_NON_INTERACTIVE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Rebuild derived features (same code path as production)
+        run: python feature_engineering.py
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Data-quality gate (real artifacts + prediction smoke test)
+        run: python data_quality.py

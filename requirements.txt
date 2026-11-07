@@ -1,6 +1,11 @@
 # Python 3.14 (cloud build) needs cp314 wheels; numpy/pandas/scipy versions below
 # are the minimums that ship them. The cloud builds from source otherwise.
 reflex==0.8.28.post1
+# reflex.model imports sqlalchemy.ext.asyncio, which requires greenlet. The
+# Reflex Cloud base image venv does not ship it, so without this pin the
+# backend crash-loops on startup (reflex exits status 1, port 8000 refused) and
+# the deployed site can never load state (cache/fixtures).
+greenlet==3.5.6
 pandas==3.0.5
 numpy==2.5.3
 joblib==1.5.2
