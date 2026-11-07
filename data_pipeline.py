@@ -192,37 +192,42 @@ def fetch_understat_xg(seasons: list[str], sleep: float = 0.4) -> pd.DataFrame:
 
 
 def merge_understat_xg(clean_df: pd.DataFrame, xg_df: pd.DataFrame) -> pd.DataFrame:
-    """Left-join real xG onto the cleaned frame; missing rows stay NaN."""
+    """Attach real xG: Understat first, then football-data's own HxG/AxG columns.
+
+    The HxG/AxG fallback always runs — even when the Understat scrape fails —
+    otherwise the whole xG feature family silently goes missing.
+    """
     out = clean_df.copy()
     out["home_xg"] = np.nan
     out["away_xg"] = np.nan
-    if xg_df is None or xg_df.empty:
-        return out
-    xg = xg_df.copy()
-    xg["date"] = pd.to_datetime(xg["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    xg["home_team"] = xg["home_team"].astype(str).str.strip()
-    xg["away_team"] = xg["away_team"].astype(str).str.strip()
-    xg = xg.drop_duplicates(subset=["date", "home_team", "away_team"])
 
-    keys = pd.DataFrame({
-        "date": pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y-%m-%d"),
-        "home_team": out["HomeTeam"].astype(str).str.strip(),
-        "away_team": out["AwayTeam"].astype(str).str.strip(),
-    })
-    merged = keys.merge(
-        xg[["date", "home_team", "away_team", "home_xg", "away_xg"]],
-        on=["date", "home_team", "away_team"],
-        how="left",
-        sort=False,
-    )
-    out["home_xg"] = merged["home_xg"].to_numpy()
-    out["away_xg"] = merged["away_xg"].to_numpy()
-    # Fall back to football-data's own xG columns (HxG/AxG) where Understat misses
+    if xg_df is not None and not xg_df.empty:
+        xg = xg_df.copy()
+        xg["date"] = pd.to_datetime(xg["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        xg["home_team"] = xg["home_team"].astype(str).str.strip()
+        xg["away_team"] = xg["away_team"].astype(str).str.strip()
+        xg = xg.drop_duplicates(subset=["date", "home_team", "away_team"])
+
+        keys = pd.DataFrame({
+            "date": pd.to_datetime(out["Date"], errors="coerce").dt.strftime("%Y-%m-%d"),
+            "home_team": out["HomeTeam"].astype(str).str.strip(),
+            "away_team": out["AwayTeam"].astype(str).str.strip(),
+        })
+        merged = keys.merge(
+            xg[["date", "home_team", "away_team", "home_xg", "away_xg"]],
+            on=["date", "home_team", "away_team"],
+            how="left",
+            sort=False,
+        )
+        out["home_xg"] = merged["home_xg"].to_numpy()
+        out["away_xg"] = merged["away_xg"].to_numpy()
+
+    # Fall back to football-data's own xG columns (HxG/AxG) where Understat misses.
     if "HxG" in out.columns:
         out["home_xg"] = out["home_xg"].fillna(pd.to_numeric(out["HxG"], errors="coerce"))
     if "AxG" in out.columns:
         out["away_xg"] = out["away_xg"].fillna(pd.to_numeric(out["AxG"], errors="coerce"))
-    matched = out["home_xg"].notna().sum()
+    matched = int(out["home_xg"].notna().sum())
     print(f"   xG matched {matched}/{len(out)} matches.")
     return out
 

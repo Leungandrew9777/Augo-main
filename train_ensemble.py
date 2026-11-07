@@ -29,15 +29,25 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from dixon_coles import DixonColesModel
 from features import MODEL_FEATURE_COLS
-from metrics import brier_multiclass, expected_calibration_error
-from model_artifacts import StackedEnsembleClassifier, TemperatureScalingCalibrator
+from market import MARKET_COLS, fit_market_blend, market_probs_from_odds
+from metrics import brier_multiclass, expected_calibration_error, per_class_ece
+from model_artifacts import (
+    SeedAveragedClassifier,
+    StackedEnsembleClassifier,
+    TemperatureScalingCalibrator,
+)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 FEATURES_FILE = os.path.join(APP_DIR, "premier_league_with_elo_best.csv")
 BEST_PARAMS_FILE = os.path.join(APP_DIR, "best_params.json")
+MARKET_BLEND_FILE = os.path.join(APP_DIR, "market_blend.pkl")
+DIXON_COLES_FILE = os.path.join(APP_DIR, "dixon_coles_model.pkl")
 
 DECAY_HALF_LIFE_DAYS = 365.0
+SEEDS = (42, 7, 2026)
+GATE_TOLERANCE = 0.005  # allowed log-loss gap vs the market before the gate blocks a save
 
 DEFAULT_PARAMS = {
     "xgb": {"n_estimators": 300, "learning_rate": 0.05, "max_depth": 6,
@@ -112,7 +122,25 @@ def fit_count_model(X_fit: pd.DataFrame, y_fit: pd.Series, sample_weight, kind: 
     return model
 
 
-def fit_base(X_fit: pd.DataFrame, y_fit: pd.Series, sample_weight, params: dict | None = None) -> list:
+def _seed_average(models: list, classes: np.ndarray):
+    if len(models) == 1:
+        return models[0]
+    return SeedAveragedClassifier(estimators_=models, classes_=classes)
+
+
+def fit_base(
+    X_fit: pd.DataFrame,
+    y_fit: pd.Series,
+    sample_weight,
+    params: dict | None = None,
+    seeds: tuple[int, ...] = (SEEDS[0],),
+) -> list:
+    """Fit the three base models, seed-averaging the stochastic ones.
+
+    LogisticRegression is deterministic; RandomForest/XGBoost are refit per
+    seed and their probabilities averaged (variance reduction for the final
+    model and the backtest).
+    """
     p = params or {}
     xgb_p = p.get("xgb", DEFAULT_PARAMS["xgb"])
     rf_p = p.get("rf", DEFAULT_PARAMS["rf"])
@@ -124,20 +152,28 @@ def fit_base(X_fit: pd.DataFrame, y_fit: pd.Series, sample_weight, params: dict 
         ]
     )
     lr.fit(X_fit, y_fit, model__sample_weight=sample_weight)
-    rf = RandomForestClassifier(
-        n_estimators=rf_p["n_estimators"], max_depth=rf_p["max_depth"],
-        min_samples_leaf=rf_p["min_samples_leaf"], random_state=42, n_jobs=-1,
-    )
-    rf.fit(X_fit, y_fit, sample_weight=sample_weight)
-    xgb = XGBClassifier(
-        n_estimators=xgb_p["n_estimators"], learning_rate=xgb_p["learning_rate"],
-        max_depth=xgb_p["max_depth"], subsample=xgb_p["subsample"],
-        colsample_bytree=xgb_p["colsample_bytree"], min_child_weight=xgb_p["min_child_weight"],
-        reg_lambda=xgb_p["reg_lambda"], random_state=42, eval_metric="mlogloss",
-        n_jobs=-1,
-    )
-    xgb.fit(X_fit, y_fit, sample_weight=sample_weight)
-    return [lr, rf, xgb]
+
+    classes = np.array([0, 1, 2])
+    rf_models = []
+    for seed in seeds:
+        rf = RandomForestClassifier(
+            n_estimators=rf_p["n_estimators"], max_depth=rf_p["max_depth"],
+            min_samples_leaf=rf_p["min_samples_leaf"], random_state=int(seed), n_jobs=-1,
+        )
+        rf.fit(X_fit, y_fit, sample_weight=sample_weight)
+        rf_models.append(rf)
+    xgb_models = []
+    for seed in seeds:
+        xgb = XGBClassifier(
+            n_estimators=xgb_p["n_estimators"], learning_rate=xgb_p["learning_rate"],
+            max_depth=xgb_p["max_depth"], subsample=xgb_p["subsample"],
+            colsample_bytree=xgb_p["colsample_bytree"], min_child_weight=xgb_p["min_child_weight"],
+            reg_lambda=xgb_p["reg_lambda"], random_state=int(seed), eval_metric="mlogloss",
+            n_jobs=-1,
+        )
+        xgb.fit(X_fit, y_fit, sample_weight=sample_weight)
+        xgb_models.append(xgb)
+    return [lr, _seed_average(rf_models, classes), _seed_average(xgb_models, classes)]
 
 
 def base_meta_input(estimators: list, X_use) -> np.ndarray:
@@ -245,6 +281,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tune", action="store_true", help="run hyperparameter random search first")
     parser.add_argument("--trials", type=int, default=24, help="number of tuning trials")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="save artifacts even if the out-of-fold market gate fails",
+    )
     args = parser.parse_args()
 
     df = load_training_frame()
@@ -279,7 +319,9 @@ def main() -> None:
     n = len(X)
     oof_base = np.full((n, 9), np.nan)
     oof_stacked = np.full((n, 3), np.nan)
+    oof_dc = np.full((n, 3), np.nan)
     oof_y = np.full(n, -1, dtype=int)
+    oof_fold = np.full(n, -1, dtype=int)
 
     stacked_scores = []
     vote_scores = []
@@ -291,14 +333,14 @@ def main() -> None:
     corner_home_mae = []
     corner_away_mae = []
 
-    for train_idx, test_idx in tscv.split(X):
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
         X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
         dates_tr = df.iloc[train_idx]["Date"]
         fold_ref = dates_tr.max()
         decay_tr = time_decay_weights(dates_tr, reference_date=fold_ref)
         sw_tr = decay_tr * class_weight[y_tr.to_numpy()]
 
-        base = fit_base(X_tr, y_tr, sw_tr, best_params)
+        base = fit_base(X_tr, y_tr, sw_tr, best_params, seeds=SEEDS)
 
         # Nested out-of-fold probabilities for the meta-learner (no leakage into test)
         meta_X_tr = np.zeros((len(X_tr), 9))
@@ -307,7 +349,9 @@ def main() -> None:
             ref_in = dates_in.max()
             decay_in = time_decay_weights(dates_in, reference_date=ref_in)
             sw_in = decay_in * class_weight[y_tr.iloc[itr].to_numpy()]
-            base_in = fit_base(X_tr.iloc[itr], y_tr.iloc[itr], sw_in, best_params)
+            # Single seed for the nested meta features keeps tuning/fitting
+            # tractable; the outer/serving fits are seed-averaged.
+            base_in = fit_base(X_tr.iloc[itr], y_tr.iloc[itr], sw_in, best_params, seeds=(SEEDS[0],))
             meta_X_tr[ite] = base_meta_input(base_in, X_tr.iloc[ite])
         meta = fit_meta(meta_X_tr, y_tr)
 
@@ -323,6 +367,11 @@ def main() -> None:
         oof_base[test_idx] = base_meta_input(base, X_te)
         oof_stacked[test_idx] = stacked_te
         oof_y[test_idx] = y.iloc[test_idx].to_numpy()
+        oof_fold[test_idx] = fold
+
+        # Dixon-Coles complement, fitted on the training window only.
+        dc_model = DixonColesModel().fit(df.iloc[train_idx])
+        oof_dc[test_idx] = dc_model.predict_proba(df.iloc[test_idx])
 
         # Goal models per fold (unchanged)
         goal_hm = fit_goal_model(X_tr, y_home_goals.iloc[train_idx], decay_tr)
@@ -359,10 +408,66 @@ def main() -> None:
     print("STEP 6b: Out-of-fold evaluation (stacked model, probabilistic metrics)")
     print_eval_metrics("OOF", oof_stacked[mask], oof_y[mask])
 
-    # STEP 7: Final stacked model on all data + calibration + save
+    # Market-anchored blend: base model + Dixon-Coles + de-vigged B365.
+    calibrator = TemperatureScalingCalibrator().fit(oof_stacked[mask], oof_y[mask])
+    oof_model_cal = calibrator.transform(oof_stacked[mask])
+    y_oof = oof_y[mask]
+    dc_oof = oof_dc[mask]
+    dc_oof = np.where(np.isfinite(dc_oof).all(axis=1, keepdims=True), dc_oof, oof_model_cal)
+    market = market_probs_from_odds(df)
+    market_np = (
+        market.to_numpy() if market is not None
+        else np.full((len(df), len(MARKET_COLS)), np.nan)
+    )
+    mk_oof = market_np[mask]
+    fold_oof = oof_fold[mask]
+    market_mask = np.isfinite(mk_oof).all(axis=1)
+
+    blend_rows = market_mask.copy()
+    oof_blend = oof_model_cal.copy()
+    for fold in sorted(set(fold_oof[blend_rows])):
+        test = blend_rows & (fold_oof == fold)
+        train = blend_rows & (fold_oof != fold)
+        if not test.any() or train.sum() < 100:
+            continue
+        blend_cv = fit_market_blend(
+            oof_model_cal[train], dc_oof[train], mk_oof[train], y_oof[train],
+        )
+        oof_blend[test] = blend_cv.predict_proba(
+            oof_model_cal[test], dc_oof[test], mk_oof[test],
+        )
+
+    n_eval = int(blend_rows.sum())
+    if n_eval:
+        base_ll = float(log_loss(y_oof[blend_rows], oof_model_cal[blend_rows], labels=[0, 1, 2]))
+        dc_ll = float(log_loss(y_oof[blend_rows], dc_oof[blend_rows], labels=[0, 1, 2]))
+        market_ll = float(log_loss(y_oof[blend_rows], mk_oof[blend_rows], labels=[0, 1, 2]))
+        blend_ll = float(log_loss(y_oof[blend_rows], oof_blend[blend_rows], labels=[0, 1, 2]))
+        print("\nSTEP 6c: Market-anchored OOF evaluation (rows with odds)")
+        print(f"   n={n_eval} | base={base_ll:.4f} | DC={dc_ll:.4f} | "
+              f"market={market_ll:.4f} | blend={blend_ll:.4f}")
+        print(f"   accuracy: base={np.mean(np.argmax(oof_model_cal[blend_rows], axis=1) == y_oof[blend_rows]):.3f} "
+              f"blend={np.mean(np.argmax(oof_blend[blend_rows], axis=1) == y_oof[blend_rows]):.3f} "
+              f"market={np.mean(np.argmax(mk_oof[blend_rows], axis=1) == y_oof[blend_rows]):.3f}")
+        print(f"   per-class ECE (A/D/H) blend: "
+              f"{ {k: round(v, 3) for k, v in per_class_ece(oof_blend[blend_rows], y_oof[blend_rows]).items()} }")
+
+        if blend_ll > market_ll + GATE_TOLERANCE:
+            message = (
+                f"market gate failed: blend log-loss {blend_ll:.4f} vs market "
+                f"{market_ll:.4f} (tolerance {GATE_TOLERANCE})"
+            )
+            if not args.force:
+                raise SystemExit(f"ERROR: {message}. Artifacts not saved; rerun with --force to override.")
+            print(f"WARN: {message}; saving because --force was passed.")
+        else:
+            print(f"[GATE] market check passed (blend {blend_ll:.4f} <= market {market_ll:.4f} "
+                  f"+ {GATE_TOLERANCE})")
+
+    # STEP 7: Final stacked model on all data + blend + per-class calibration + save
     final_decay = time_decay_weights(df["Date"])
     sw_all = final_decay * class_weight[y.to_numpy()]
-    base_final = fit_base(X, y, sw_all, best_params)
+    base_final = fit_base(X, y, sw_all, best_params, seeds=SEEDS)
     meta_final = fit_meta(oof_base[mask], pd.Series(oof_y[mask]))
     stacked_final = StackedEnsembleClassifier(
         estimators_=base_final,
@@ -371,9 +476,23 @@ def main() -> None:
         feature_names_in_=np.array(list(X.columns), dtype=object),
         vote_weight=0.5,
     )
-    calibrator = TemperatureScalingCalibrator().fit(oof_stacked[mask], oof_y[mask])
     stacked_final.calibrator_ = calibrator
-    print(f"[OK] Calibration temperature T = {calibrator.temperature_:.4f}")
+    print(f"[OK] Base calibration temperature T = {calibrator.temperature_:.4f}")
+
+    market_blend = None
+    if n_eval:
+        market_blend = fit_market_blend(
+            oof_model_cal[blend_rows], dc_oof[blend_rows], mk_oof[blend_rows], y_oof[blend_rows],
+        )
+        market_blend.metadata_ = {
+            "n": n_eval,
+            "base_log_loss": base_ll,
+            "dc_log_loss": dc_ll,
+            "market_log_loss": market_ll,
+            "blend_log_loss": blend_ll,
+            "seeds": list(SEEDS),
+        }
+    dc_final = DixonColesModel().fit(df)
 
     goal_model_home = fit_goal_model(X, y_home_goals, final_decay)
     goal_model_away = fit_goal_model(X, y_away_goals, final_decay)
@@ -390,14 +509,17 @@ def main() -> None:
         "goal_model_ht_away.pkl": goal_model_ht_away,
         "corner_model_home.pkl": corner_model_home,
         "corner_model_away.pkl": corner_model_away,
+        "dixon_coles_model.pkl": dc_final,
     }
+    if market_blend is not None:
+        artifacts["market_blend.pkl"] = market_blend
     for name, model in artifacts.items():
         joblib.dump(model, os.path.join(APP_DIR, name))
 
     print("\nSTEP 5 + 6 + 7 COMPLETE")
     for name in artifacts:
         print(f"   Saved -> {name}")
-    print("   run_pipeline.py and app.py will now use the new stacked ensemble.")
+    print("   run_pipeline.py and app.py will now use the market-blended ensemble.")
 
 
 if __name__ == "__main__":

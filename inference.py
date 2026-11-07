@@ -8,8 +8,10 @@ through this module, so the two paths can never drift apart.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -20,9 +22,40 @@ from features import (
     ensure_model_features,
 )
 from league import FALLBACK_BADGE, TEAM_BADGES
+from market import market_probs_from_odds
 from team_aliases import badge_lookup_key
 
 _FACTORIALS = [math.factorial(i) for i in range(21)]
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+MARKET_BLEND_FILE = os.path.join(APP_DIR, "market_blend.pkl")
+DIXON_COLES_FILE = os.path.join(APP_DIR, "dixon_coles_model.pkl")
+_ARTIFACT_CACHE: dict[str, tuple[float, Any]] = {}
+
+
+def _load_artifact(path: str):
+    """Load a pickled serving artifact, cached until its mtime changes."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    cached = _ARTIFACT_CACHE.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        value = joblib.load(path)
+    except Exception:
+        return None
+    _ARTIFACT_CACHE[path] = (mtime, value)
+    return value
+
+
+def load_market_blend():
+    return _load_artifact(MARKET_BLEND_FILE)
+
+
+def load_dixon_coles():
+    return _load_artifact(DIXON_COLES_FILE)
 
 
 def _append_columns(frame: pd.DataFrame, cols) -> pd.DataFrame:
@@ -179,20 +212,63 @@ def _disp_poisson_vs_ensemble_row(r: pd.Series) -> str:
 def predict_matches(upcoming: pd.DataFrame, model, df_elo: pd.DataFrame) -> pd.DataFrame:
     """Ensemble probabilities plus every display field for upcoming fixtures.
 
-    Model classes are encoded as 0=Away, 1=Draw, 2=Home.
+    When bookmaker odds are available the served probabilities are the
+    out-of-fold market blend of [model, Dixon-Coles, market]; otherwise the
+    calibrated model probabilities are used. Classes are 0=Away, 1=Draw, 2=Home.
     """
     feature_cols = detect_model_features(model) or MODEL_FEATURE_COLS
     upcoming = ensure_model_features(upcoming, df_elo, feature_cols)
-    probs = model.predict_proba(upcoming[feature_cols])
+    model_probs = np.asarray(model.predict_proba(upcoming[feature_cols]), dtype=float)
+
+    market = market_probs_from_odds(upcoming)
+    dc_model = load_dixon_coles()
+    dc_probs = None
+    if dc_model is not None:
+        try:
+            dc_probs = np.asarray(dc_model.predict_proba(upcoming), dtype=float)
+        except Exception:
+            dc_probs = None
+
+    blend = load_market_blend()
+    probs = model_probs
+    used_market = np.zeros(len(upcoming), dtype=bool)
+    if market is not None and blend is not None:
+        usable = market.notna().all(axis=1).to_numpy()
+        if usable.any():
+            dc_part = dc_probs[usable] if dc_probs is not None else model_probs[usable]
+            blended = model_probs.copy()
+            blended[usable] = np.asarray(
+                blend.predict_proba(model_probs[usable], dc_part, market.to_numpy()[usable]),
+                dtype=float,
+            )
+            probs = blended
+            used_market = np.asarray(usable, dtype=bool)
 
     base_cols = {
         "prob_away": probs[:, 0],
         "prob_draw": probs[:, 1],
         "prob_home": probs[:, 2],
+        "base_prob_away": model_probs[:, 0],
+        "base_prob_draw": model_probs[:, 1],
+        "base_prob_home": model_probs[:, 2],
     }
     base_cols["fair_odds_home"] = 1.0 / base_cols["prob_home"]
     base_cols["fair_odds_draw"] = 1.0 / base_cols["prob_draw"]
     base_cols["fair_odds_away"] = 1.0 / base_cols["prob_away"]
+    extra_cols: dict[str, Any] = {"used_market": used_market}
+    if market is not None:
+        extra_cols.update({
+            "market_prob_home": market["market_prob_home"].to_numpy(),
+            "market_prob_draw": market["market_prob_draw"].to_numpy(),
+            "market_prob_away": market["market_prob_away"].to_numpy(),
+        })
+    if dc_probs is not None:
+        extra_cols.update({
+            "dc_prob_home": dc_probs[:, 2],
+            "dc_prob_draw": dc_probs[:, 1],
+            "dc_prob_away": dc_probs[:, 0],
+        })
+    base_cols.update(extra_cols)
     upcoming = _append_columns(upcoming, base_cols)
 
     disp: dict[str, Any] = {

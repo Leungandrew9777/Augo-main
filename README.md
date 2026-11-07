@@ -11,8 +11,9 @@ land.
 ```
 ONE-TIME (or after retraining):
   python data_pipeline.py        -> premier_league_historical_clean.csv
-  python feature_engineering.py  -> premier_league_with_elo_best.csv
-  python train_ensemble.py       -> xgboost_premier_league_model.pkl
+  python feature_engineering.py  -> premier_league_with_elo_best.csv + team_state.json
+  python train_ensemble.py       -> xgboost_premier_league_model.pkl,
+                                    market_blend.pkl, dixon_coles_model.pkl
 
 WEEKLY (each matchday — automated by scheduled.ps1 / GitHub Actions):
   # 1. refresh fixtures.csv + results.csv, then check them
@@ -33,8 +34,9 @@ WEEKLY (each matchday — automated by scheduled.ps1 / GitHub Actions):
 
 MONTHLY (manual retrain — deliberately NOT part of the automation):
   python data_pipeline.py         # re-download all seasons (includes finished GWs)
-  python feature_engineering.py   # rebuild rolling form + ELO features
-  python train_ensemble.py        # retrain ensemble + goal/HT/corner models
+  python feature_engineering.py   # rebuild rolling form + ELO features + team_state.json
+  python train_ensemble.py        # retrain ensemble + market blend + Dixon-Coles (+ gate)
+  python backtest.py --json       # rolling-origin validation vs market/base-rate
   python run_pipeline.py [--gw N] # re-score the upcoming GW with the new models
 ```
 
@@ -57,13 +59,20 @@ python feature_engineering.py
 #    -> premier_league_with_elo_best.csv
 #    -> team_state.json   (post-last-match ELO + rolling features used at inference)
 
-# 4. retrain the stacked ensemble + goal/HT/corner models
+# 4. retrain the stacked ensemble + market blend + Dixon-Coles + goal/HT/corner
 python train_ensemble.py            # reuses saved best_params.json if present
 python train_ensemble.py --tune     # optional: walk-forward random search first
-#    -> xgboost_premier_league_model.pkl, goal_model_{home,away}.pkl,
-#       goal_model_ht_{home,away}.pkl, corner_model_{home,away}.pkl
+#    -> xgboost_premier_league_model.pkl, market_blend.pkl, dixon_coles_model.pkl,
+#       goal_model_{home,away}.pkl, goal_model_ht_{home,away}.pkl,
+#       corner_model_{home,away}.pkl
+#    The retrain refuses to save if the market-relative OOF gate fails
+#    (blend worse than market-only by more than GATE_TOLERANCE); --force overrides.
 
-# 5. validate the rebuilt artifacts, then re-score the upcoming GW
+# 5. full rolling-origin validation (last 5 seasons + current; market/base-rate
+#    baselines, nested tuning available with --tune, bootstrap CIs)
+python backtest.py --seasons 5 --seeds 42,7,2026 --json
+
+# 6. validate the rebuilt artifacts, then re-score the upcoming GW
 python data_quality.py --history --artifacts
 python run_pipeline.py [--gw N]
 ```
@@ -87,6 +96,19 @@ Notes:
   scheduled jobs abort on errors and alert via Telegram.
 - `python -m pytest` runs the test suite (`requirements-dev.txt`); CI runs it
   on Python 3.14 with the pinned dependencies before the data-quality gate.
+- Serving probabilities are anchored to the market: the base classifier is
+  blended out-of-fold with the de-vigged B365 prices and the Dixon-Coles
+  scoreline model, then per-class (vector) calibrated. If odds are missing for
+  a fixture the base probabilities are used for that row (`used_market` flag in
+  the cache).
+- `backtest.py` trains each of the last N seasons on earlier seasons only and
+  reports base, Dixon-Coles, market-only, base-rate and market-blend log-loss /
+  Brier / accuracy / ECE on the same rows, with bootstrap CIs for the
+  blend-minus-market difference. `--tune` adds nested hyperparameter search.
+- `train_ensemble.py` gates saving on the market-relative out-of-fold log-loss
+  (not on CV accuracy). The historical feature CSV is read-only during
+  training/backtests; only model artifacts and the new `backtest_report.json`
+  are written.
 - Retrain only after the GW's results are final. Existing
   `predictions_history/GW{N}.json` snapshots are never overwritten, so history,
   grading, and bankroll stay intact; re-running `run_pipeline.py` only updates
@@ -114,6 +136,9 @@ Notes:
 | `metrics.py` | Shared Brier / expected-calibration-error metrics for training and evaluation. |
 | `dates.py` | Shared date parsing for the mixed `DD/MM/YYYY` + `DD/MM/YY` Football-Data files. |
 | `rounds.py` | Date-based gameweek clustering/renumbering, shared by sync and validation. |
+| `market.py` | De-vigged bookmaker probabilities and the out-of-fold market/DC blend. |
+| `dixon_coles.py` | Time-weighted Dixon-Coles ratings (goals/xG) -> scoreline-based H/D/A probabilities. |
+| `backtest.py` | Season rolling-origin backtest with market/base-rate baselines, bootstrap CIs, per-class reliability. |
 | `data_quality.py` | Hard data-quality gate: fixtures/results, history coverage, artifact freshness, prediction smoke test. |
 | `tests/` | Pytest suite: rounds, mixed-date parsing, data quality, team state, end-to-end serving. |
 | `team_aliases.py` | Maps team-name variants between fixtures, ELO history, results, and the odds API. |
@@ -131,7 +156,10 @@ Notes:
 | `premier_league_historical_clean.csv` | Output of `data_pipeline.py`. |
 | `premier_league_with_elo_best.csv` | Output of `feature_engineering.py` (historical training features). |
 | `team_state.json` | Output of `feature_engineering.py`: post-last-match ELO ratings and per-team/venue rolling features served at inference time. |
-| `xgboost_premier_league_model.pkl` | Output of `train_ensemble.py`. |
+| `xgboost_premier_league_model.pkl` | Output of `train_ensemble.py` (market-blind base ensemble). |
+| `market_blend.pkl` | Output of `train_ensemble.py`: out-of-fold `[model, Dixon-Coles, market]` stacker + vector calibrator. |
+| `dixon_coles_model.pkl` | Output of `train_ensemble.py`: time-weighted attack/defence ratings used by the blend. |
+| `backtest_report.json` | Output of `backtest.py --json` (rolling-origin metrics/baselines/CIs). |
 | `predictions_cache.json` | Latest predictions written by `run_pipeline.py`; consumed by `app.py`. |
 | `predictions_history/GW{N}.json` | Per-gameweek snapshot. Power the History tab. |
 | `user_picks.json` | Persisted user picks per gameweek (`{gw: {match_idx: "H"/"D"/"A"}}`). |

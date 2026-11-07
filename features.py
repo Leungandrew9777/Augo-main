@@ -60,7 +60,6 @@ MODEL_FEATURE_COLS: list[str] = [
     "diff_avg_GF", "diff_avg_GA", "diff_avg_SoT", "diff_avg_Shots",
     "diff_avg_SoTAgainst", "diff_avg_ShotsAgainst",
     "diff_avg_xG", "diff_avg_xGA", "diff_avg_xG_overperf",
-    "h2h_home_wins", "h2h_draws", "h2h_total_goals_avg",
 ]
 
 

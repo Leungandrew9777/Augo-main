@@ -38,6 +38,8 @@ CLEAN_FILE = os.getenv("AUGO_CLEAN_FILE") or os.path.join(APP_DIR, "premier_leag
 ELO_FILE = os.getenv("AUGO_ELO_FILE") or os.path.join(APP_DIR, "premier_league_with_elo_best.csv")
 STATE_FILE = os.getenv("AUGO_STATE_FILE") or os.path.join(APP_DIR, "team_state.json")
 MODEL_FILE = os.getenv("AUGO_MODEL_FILE") or os.path.join(APP_DIR, "xgboost_premier_league_model.pkl")
+MARKET_BLEND_FILE = os.getenv("AUGO_MARKET_BLEND_FILE") or os.path.join(APP_DIR, "market_blend.pkl")
+DIXON_COLES_FILE = os.getenv("AUGO_DIXON_COLES_FILE") or os.path.join(APP_DIR, "dixon_coles_model.pkl")
 
 HISTORY_SEASONS = [
     "2627", "2526", "2425", "2324", "2223", "2122", "2021",
@@ -327,6 +329,13 @@ def validate_artifacts(*, today=None) -> Issues:
         if missing:
             errors.append(f"team_state.json: no rating for team(s) {missing}")
 
+    for path, label, hint in [
+        (MARKET_BLEND_FILE, "market blend", "run train_ensemble.py"),
+        (DIXON_COLES_FILE, "Dixon-Coles model", "run train_ensemble.py"),
+    ]:
+        if not os.path.exists(path):
+            errors.append(f"{label} missing: {path} — {hint}")
+
     if os.path.exists(MODEL_FILE) and os.path.exists(ELO_FILE) and isinstance(state, dict) and fixtures is not None:
         try:
             info = _smoke_predict(fixtures, today)
@@ -382,7 +391,26 @@ def _smoke_predict(fixtures: pd.DataFrame, today) -> str:
         raise ValueError("non-finite probabilities")
     if not np.allclose(probs.sum(axis=1), 1.0, atol=1e-6):
         raise ValueError("probabilities do not sum to 1")
-    return f"prediction smoke test OK (GW{gw}, {len(frame)} fixtures)"
+
+    from inference import load_dixon_coles, load_market_blend, predict_matches
+
+    blend = load_market_blend()
+    if blend is not None and load_dixon_coles() is not None:
+        odds_frame = upcoming.copy()
+        odds_frame["B365H"] = 2.0
+        odds_frame["B365D"] = 3.5
+        odds_frame["B365A"] = 4.0
+        out = predict_matches(odds_frame, model, df_elo)
+        if not bool(out["used_market"].all()):
+            raise ValueError("market blend was not applied despite odds being present")
+        blended = out[["prob_home", "prob_draw", "prob_away"]].to_numpy(dtype=float)
+        if not np.allclose(blended.sum(axis=1), 1.0, atol=1e-6):
+            raise ValueError("blended probabilities do not sum to 1")
+
+    return (
+        f"prediction smoke test OK (GW{gw}, {len(frame)} fixtures, "
+        f"market blend={'yes' if blend is not None else 'no'})"
+    )
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

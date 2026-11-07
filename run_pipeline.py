@@ -37,6 +37,8 @@ FIXTURES_FILE  = os.path.join(APP_DIR, "fixtures.csv")
 ELO_FILE       = os.path.join(APP_DIR, "premier_league_with_elo_best.csv")
 STATE_FILE     = os.path.join(APP_DIR, "team_state.json")
 MODEL_FILE     = os.path.join(APP_DIR, "xgboost_premier_league_model.pkl")
+MARKET_BLEND_FILE = os.path.join(APP_DIR, "market_blend.pkl")
+DIXON_COLES_FILE  = os.path.join(APP_DIR, "dixon_coles_model.pkl")
 GOAL_HOME_FILE = os.path.join(APP_DIR, "goal_model_home.pkl")
 GOAL_AWAY_FILE = os.path.join(APP_DIR, "goal_model_away.pkl")
 HT_HOME_FILE   = os.path.join(APP_DIR, "goal_model_ht_home.pkl")
@@ -174,6 +176,8 @@ def main():
 
     for path, hint in [
         (MODEL_FILE,    "Run train_ensemble.py first."),
+        (MARKET_BLEND_FILE, "Run train_ensemble.py first."),
+        (DIXON_COLES_FILE,  "Run train_ensemble.py first."),
         (GOAL_HOME_FILE, "Run train_ensemble.py first."),
         (GOAL_AWAY_FILE, "Run train_ensemble.py first."),
         (ELO_FILE,      "Run feature_engineering.py first."),

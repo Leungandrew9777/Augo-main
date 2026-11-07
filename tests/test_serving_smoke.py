@@ -27,6 +27,24 @@ def _next_gameweek(fixtures: pd.DataFrame) -> int:
     return int(pd.to_numeric(fixtures["gameweek"], errors="coerce").dropna().max())
 
 
+def _upcoming_for_next_gameweek(include_odds: bool = False) -> pd.DataFrame:
+    fixtures = pd.read_csv(FIXTURES)
+    fixtures["_date"] = dates.parse_series(fixtures["date"])
+    fixtures = fixtures.dropna(subset=["_date", "home_team", "away_team"])
+    gw = _next_gameweek(fixtures)
+    selected = fixtures[pd.to_numeric(fixtures["gameweek"], errors="coerce") == gw].sort_values("_date")
+    upcoming = pd.DataFrame({
+        "date": selected["_date"].dt.strftime("%Y-%m-%d"),
+        "home_team": selected["home_team"].astype(str),
+        "away_team": selected["away_team"].astype(str),
+    }).reset_index(drop=True)
+    if include_odds:
+        upcoming["B365H"] = 2.0
+        upcoming["B365D"] = 3.5
+        upcoming["B365A"] = 4.0
+    return upcoming
+
+
 def test_real_artifacts_predict_next_gameweek():
     from features import (
         MODEL_FEATURE_COLS,
@@ -38,18 +56,7 @@ def test_real_artifacts_predict_next_gameweek():
     from inference import predict_matches
 
     model, df_elo = load_model_and_elo(MODEL, ELO)
-    fixtures = pd.read_csv(FIXTURES)
-    fixtures["_date"] = dates.parse_series(fixtures["date"])
-    fixtures = fixtures.dropna(subset=["_date", "home_team", "away_team"])
-
-    gw = _next_gameweek(fixtures)
-    selected = fixtures[pd.to_numeric(fixtures["gameweek"], errors="coerce") == gw].sort_values("_date")
-    upcoming = pd.DataFrame({
-        "date": selected["_date"].dt.strftime("%Y-%m-%d"),
-        "home_team": selected["home_team"].astype(str),
-        "away_team": selected["away_team"].astype(str),
-    }).reset_index(drop=True)
-
+    upcoming = _upcoming_for_next_gameweek()
     upcoming = compute_current_elo(upcoming, df_elo)
     feature_cols = detect_model_features(model) or MODEL_FEATURE_COLS
     upcoming = ensure_model_features(upcoming, df_elo, feature_cols)
@@ -62,6 +69,24 @@ def test_real_artifacts_predict_next_gameweek():
     out = predict_matches(upcoming, model, df_elo)
     probs = out[["prob_home", "prob_draw", "prob_away"]].to_numpy(dtype=float)
     assert np.isfinite(probs).all()
+    assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-6)
+
+
+def test_market_blend_applied_when_odds_present():
+    from features import load_model_and_elo
+    from inference import load_market_blend, predict_matches
+
+    if load_market_blend() is None:
+        pytest.skip("market blend artifact not built")
+
+    model, df_elo = load_model_and_elo(MODEL, ELO)
+    upcoming = _upcoming_for_next_gameweek(include_odds=True)
+    out = predict_matches(upcoming, model, df_elo)
+
+    assert "market_prob_home" in out.columns
+    assert "used_market" in out.columns
+    assert bool(out["used_market"].all())
+    probs = out[["prob_home", "prob_draw", "prob_away"]].to_numpy(dtype=float)
     assert np.allclose(probs.sum(axis=1), 1.0, atol=1e-6)
 
 
